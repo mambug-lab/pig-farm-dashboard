@@ -2,24 +2,25 @@
 
 ## 현재 운영 버전
 
-- index.html:
-- Apps Script Code.gs:
-- GitHub Pages:
-- 월간연동용 gid:
+- 프로젝트 버전: v0.1.0-dev
+- 상태: 개발 및 검증 중
+- 기준일: 2026-07-29
+- GitHub 저장소: pig-farm-dashboard
+- 기본 브랜치: main
 
-## 완료
+### 운영 파일
 
-- GitHub Pages 배포
-- 한국어/러시아어 전환
-- 월별 최신 입력 월 자동 선택
-- 월간·연간 연동용 시트 생성
+- 대시보드: `index.html`
+- Apps Script: `apps-script/Code.gs`
+- Apps Script 매니페스트: `apps-script/appsscript.json`
+- GitHub Pages: `https://mambug-lab.github.io/pig-farm-dashboard/`
+- Google Sheets 월간연동용 GID: `46976503`
 
-## 진행 중
+### 현재 확인된 상태
 
-- 마지막 작업일지 전체 블록 복사
-- 7월 12일 마지막 5개 행 누락 수정
-
-## 미해결
-
-- MSY 검증
-- 월누적 출하·폐사 재검증
+- 최신 입력 월 자동 선택: 정상
+- 현재 최신 입력 월: Июль 2026
+- 월간연동용 시트 생성: 정상
+- 7월 12일 마지막 5개 행 복사: 수정 및 검증 완료
+- 월간연동용 시트 F1에서 유효 입력 확인 행이 665~668 3개 행인 것에 대한 확인 필요
+- HTML 대시보드 계산: 재검증 필요

@@ -725,7 +725,13 @@
 
   <script>
     const SHEET_ID = "1DcnLGcjh5m2zfilXzDLQCv7u6dOyzyXdUJol2Svk3IA";
-    const GID_CANDIDATES = ["46976503", ""];
+    const MONTHLY_LINK_SOURCE = {
+      gid: "46976503",
+      sheetName: "대시보드_월간연동용"
+    };
+    const ANNUAL_LINK_SOURCE = {
+      sheetName: "대시보드_연간연동용"
+    };
 
     const COL_SECTION = 0;
     const COL_SUB = 2;
@@ -1045,6 +1051,7 @@
     ]);
 
     let latestRows = [];
+    let latestAnnualRows = [];
     let latestDetailRows = [];
     let latestGidUsed = "";
 
@@ -1098,7 +1105,7 @@
       applyStaticTexts();
 
       if (latestRows.length > 0) {
-        renderDashboard(latestRows, latestGidUsed);
+        renderDashboard(latestRows, latestGidUsed, latestAnnualRows);
       } else {
         resetEmptyMessages();
       }
@@ -1352,7 +1359,7 @@
       });
     }
 
-    function loadGvizRows(gid) {
+    function loadGvizRows(source) {
       return new Promise((resolve, reject) => {
         clearOldJsonpScripts();
 
@@ -1397,8 +1404,10 @@
           "&headers=0&t=" +
           Date.now();
 
-        if (gid) {
-          url += "&gid=" + encodeURIComponent(gid);
+        if (source && source.gid) {
+          url += "&gid=" + encodeURIComponent(source.gid);
+        } else if (source && source.sheetName) {
+          url += "&sheet=" + encodeURIComponent(source.sheetName);
         }
 
         const script = document.createElement("script");
@@ -1568,21 +1577,7 @@
       );
     }
 
-    function isValidTotalRecord(record) {
-      if (!record) return false;
-
-      return (
-        record.previous !== 0 ||
-        record.incoming !== 0 ||
-        record.outgoing !== 0 ||
-        record.loss !== 0 ||
-        record.sale !== 0 ||
-        record.current !== 0
-      );
-    }
-
-    function extractDatedTotalRows(lines, options = {}) {
-      const includeInvalid = options.includeInvalid === true;
+    function extractDatedTotalRows(lines) {
       const records = [];
       let currentDate = null;
 
@@ -1610,61 +1605,49 @@
           current: num(row[COL_CURRENT])
         };
 
-        if (includeInvalid || isValidTotalRecord(record)) {
-          records.push(record);
-        }
+        records.push(record);
       });
 
       return records;
     }
 
-    function getValidDatedTotalRows(lines) {
-      return extractDatedTotalRows(lines)
-        .filter(item => item.date && isValidTotalRecord(item))
+    function getUniqueLatestTotalRowsByDate(lines) {
+      const rows = extractDatedTotalRows(lines)
+        .filter(item => item.date)
         .sort((a, b) => {
           const dateDiff = a.date - b.date;
-          if (dateDiff !== 0) return dateDiff;
-          return a.rowIndex - b.rowIndex;
+          return dateDiff !== 0 ? dateDiff : a.rowIndex - b.rowIndex;
         });
-    }
-
-    function getUniqueLatestValidTotalRowsByDate(lines) {
-      const validRows = getValidDatedTotalRows(lines);
       const map = new Map();
 
-      validRows.forEach(record => {
-        const key = dateKey(record.date);
-        const existing = map.get(key);
+      rows.forEach(record => {
+        map.set(dateKey(record.date), record);
+      });
 
-        if (!existing || record.rowIndex > existing.rowIndex) {
-          map.set(key, record);
+      return Array.from(map.values()).sort((a, b) => a.date - b.date);
+    }
+
+    function findLatestLinkedLogDate(lines) {
+      let latestDate = null;
+
+      lines.forEach(row => {
+        const foundDate = detectDateFromRow(row);
+        if (foundDate && (!latestDate || foundDate > latestDate)) {
+          latestDate = foundDate;
         }
       });
 
-      return Array.from(map.values()).sort((a, b) => {
-        const dateDiff = a.date - b.date;
-        if (dateDiff !== 0) return dateDiff;
-        return a.rowIndex - b.rowIndex;
-      });
+      return latestDate;
     }
 
     function getLatestTotalRecord(lines) {
-      const validRecords = getUniqueLatestValidTotalRowsByDate(lines);
+      const latestDate = findLatestLinkedLogDate(lines);
+      if (!latestDate) return null;
 
-      if (validRecords.length > 0) {
-        return validRecords[validRecords.length - 1];
-      }
+      const records = getUniqueLatestTotalRowsByDate(lines)
+        .filter(record => sameDate(record.date, latestDate));
 
-      const fallback = extractDatedTotalRows(lines)
-        .filter(item => isValidTotalRecord(item))
-        .sort((a, b) => a.rowIndex - b.rowIndex);
-
-      return fallback.length > 0 ? fallback[fallback.length - 1] : null;
-    }
-
-    function findLatestValidLogDate(lines) {
-      const latestTotal = getLatestTotalRecord(lines);
-      return latestTotal && latestTotal.date ? latestTotal.date : null;
+      return records.length > 0 ? records[records.length - 1] : null;
     }
 
     function getRowsForDate(lines, targetDate) {
@@ -1693,7 +1676,7 @@
     }
 
     function getRowsForLatestValidLog(lines) {
-      const latestDate = findLatestValidLogDate(lines);
+      const latestDate = findLatestLinkedLogDate(lines);
 
       if (!latestDate) {
         return lines.filter(row => hasAnyNumericValue(row));
@@ -1706,7 +1689,7 @@
 
     function updateLatestLogDate(lines) {
       const el = document.getElementById("latest-log-date");
-      const latestDate = findLatestValidLogDate(lines);
+      const latestDate = findLatestLinkedLogDate(lines);
       const formatted = formatLogDate(latestDate);
 
       el.textContent = `${tr("journalDate")}: ${formatted}`;
@@ -1920,8 +1903,6 @@
         foundMomRow = true;
       }
 
-      if (totalMoms <= 0) totalMoms = 375;
-
       return {
         totalPigs,
         totalMoms,
@@ -1933,7 +1914,7 @@
     }
 
     function calcMonthCumulative(lines) {
-      const datedTotalRows = getUniqueLatestValidTotalRowsByDate(lines);
+      const datedTotalRows = getUniqueLatestTotalRowsByDate(lines);
 
       if (datedTotalRows.length === 0) {
         return {
@@ -1965,8 +1946,8 @@
       };
     }
 
-    function calcMsyByDiaryAverage(lines, fallbackSowCount) {
-      const totalRowsByDate = getUniqueLatestValidTotalRowsByDate(lines);
+    function calcMsyByDiaryAverage(lines) {
+      const totalRowsByDate = getUniqueLatestTotalRowsByDate(lines);
 
       let totalSale = 0;
       let totalSowSum = 0;
@@ -1976,13 +1957,9 @@
         const dayRows = getRowsForDate(lines, totalRecord.date);
         const sowSummary = buildSowSummaryFromLines(dayRows);
 
-        let sowCount = 0;
-
-        if (sowSummary && sowSummary.current > 0) {
-          sowCount = sowSummary.current;
-        } else if (fallbackSowCount && fallbackSowCount > 0) {
-          sowCount = fallbackSowCount;
-        }
+        const sowCount = sowSummary && sowSummary.current > 0
+          ? sowSummary.current
+          : 0;
 
         if (sowCount <= 0) return;
 
@@ -2168,9 +2145,10 @@
       sideTree.innerHTML = html;
     }
 
-    function renderDashboard(lines, gidUsed) {
+    function renderDashboard(lines, sourceUsed, annualLines = []) {
       latestRows = lines;
-      latestGidUsed = gidUsed;
+      latestAnnualRows = annualLines;
+      latestGidUsed = sourceUsed;
 
       applyStaticTexts();
 
@@ -2183,7 +2161,7 @@
       const groups = buildGroupSummary(detailRows, latestLogRows);
       const totals = findTotals(lines, latestLogRows);
       const month = calcMonthCumulative(lines);
-      const msyStats = calcMsyByDiaryAverage(lines, totals.totalMoms);
+      const msyStats = calcMsyByDiaryAverage(annualLines);
       const fatteningGroup = getGroupByKey(groups, "fattening");
 
       const estimatedMSY = msyStats.estimatedMSY > 0
@@ -2207,7 +2185,7 @@
       renderCompositionTable(groups);
       renderSideTree(detailRows);
 
-      const gidText = gidUsed ? `gid=${gidUsed}` : tr("firstSheet");
+      const gidText = sourceUsed;
       const logDateText = logDateInfo && logDateInfo.text !== "-"
         ? ` · ${tr("journalDate")} ${logDateInfo.text}`
         : "";
@@ -2219,9 +2197,7 @@
       );
 
       const sideSectionCount = new Set(detailRows.map(row => row.section)).size;
-      const validDatedTotalRows = getUniqueLatestValidTotalRowsByDate(lines);
-      const allTotalRows = extractDatedTotalRows(lines, { includeInvalid: true });
-      const ignoredBlankRows = Math.max(0, allTotalRows.length - extractDatedTotalRows(lines).length);
+      const validDatedTotalRows = getUniqueLatestTotalRowsByDate(lines);
       const sowSummary = buildSowSummaryFromLines(latestLogRows);
 
       showDebug(`
@@ -2234,7 +2210,6 @@
         ${escapeHtml(tr("houseCount"))}: ${sideSectionCount.toLocaleString()}<br>
         ${escapeHtml(tr("groupCount"))}: ${groups.length.toLocaleString()}<br>
         ${escapeHtml(tr("datedTotalRows"))}: ${validDatedTotalRows.length.toLocaleString()}<br>
-        ${escapeHtml(tr("ignoredBlankRows"))}: ${ignoredBlankRows.toLocaleString()}<br>
         ${escapeHtml(tr("monthRowsUsed"))}: ${month.rowsUsed.toLocaleString()}<br>
         ${escapeHtml(tr("msyRowsUsed"))}: ${msyStats.validDays.toLocaleString()}<br>
         ${escapeHtml(tr("msyTotalSale"))}: ${formatHead(msyStats.totalSale)}<br>
@@ -2268,25 +2243,27 @@
       const errors = [];
 
       try {
-        for (const gid of GID_CANDIDATES) {
-          try {
-            const rows = await loadGvizRows(gid);
-            const result = renderDashboard(rows, gid);
+        const monthlyRows = await loadGvizRows(MONTHLY_LINK_SOURCE);
+        let annualRows = [];
 
-            if (
-              result.totals.foundTotalRow ||
-              result.groups.length > 0 ||
-              result.detailRows.length > 0
-            ) {
-              return;
-            }
-
-            errors.push(`${gid ? "gid=" + gid : tr("firstSheet")}: ${tr("linkedButNoData")}`);
-          } catch (err) {
-            errors.push(`${gid ? "gid=" + gid : tr("firstSheet")}: ${err.message}`);
-          }
+        try {
+          annualRows = await loadGvizRows(ANNUAL_LINK_SOURCE);
+        } catch (err) {
+          errors.push(`${ANNUAL_LINK_SOURCE.sheetName}: ${err.message}`);
         }
 
+        const sourceText = `gid=${MONTHLY_LINK_SOURCE.gid} (${MONTHLY_LINK_SOURCE.sheetName})`;
+        const result = renderDashboard(monthlyRows, sourceText, annualRows);
+
+        if (
+          result.totals.foundTotalRow ||
+          result.groups.length > 0 ||
+          result.detailRows.length > 0
+        ) {
+          return;
+        }
+
+        errors.push(`${sourceText}: ${tr("linkedButNoData")}`);
         throw new Error(tr("errorNoValidData"));
 
       } catch (err) {

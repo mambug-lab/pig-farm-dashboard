@@ -23,13 +23,6 @@ const DASHBOARD_CONFIG = {
 
   OUTPUT_START_ROW: 3,
 
-  // 유효 입력 확인 구간
-  // 원본 월별 작업일지 기준:
-  // 15~18행, 41~44행, 67~70행, 93~96행 ...
-  VALID_INPUT_FIRST_ROW: 15,
-  VALID_INPUT_BLOCK_HEIGHT: 4,
-  VALID_INPUT_BLOCK_INTERVAL: 26,
-
   // E:H 열
   VALID_INPUT_FIRST_COL: 5,
   VALID_INPUT_LAST_COL: 8,
@@ -37,9 +30,6 @@ const DASHBOARD_CONFIG = {
   // false: 0만 입력된 셀은 유효 입력으로 보지 않음
   // 현장 입력에서 "0"도 작업 완료 표시로 쓰려면 true로 변경 가능
   COUNT_ZERO_AS_VALID_INPUT: false,
-
-  // 다음 날짜 행을 못 찾는 예외 상황에서만 사용할 보조 복사 길이
-  FALLBACK_COPY_ROWS_AFTER_DATE: 40,
 
   MONTHS_RU: [
     "Январь",
@@ -211,10 +201,11 @@ function findLatestMonthlySheetWithValidData_(ss) {
 /**
  * 월별 시트 분석
  *
- * 1. 15~18, 41~44... E:H에서 수동 입력 숫자를 찾음
- * 2. 해당 행 위쪽에서 날짜 행을 찾음
- * 3. 그 다음 날짜 행을 찾음
- * 4. 다음 날짜 행 직전까지 복사 종료
+ * 1. 시트에서 날짜 행을 모두 찾음
+ * 2. 각 날짜 행부터 다음 날짜 행 직전까지를 하나의 작업일지 블록으로 봄
+ * 3. 블록의 E:H에서 수식이 아닌 수동 입력 숫자를 찾음
+ *    (ИТОГО/ВСЕГО 행은 유효 입력 판정에서 제외)
+ * 4. 유효한 마지막 날짜 블록의 끝까지 복사
  */
 function analyzeMonthlySheet_(sheet, sheetName, monthIndex) {
   const maxRows = Math.min(DASHBOARD_CONFIG.MAX_ROWS_PER_MONTH, sheet.getMaxRows());
@@ -224,57 +215,31 @@ function analyzeMonthlySheet_(sheet, sheetName, monthIndex) {
   const displayValues = range.getDisplayValues();
   const formulas = range.getFormulas();
 
+  const dateRows = findDateRows_(values, displayValues);
   let latestValid = null;
 
-  for (
-    let validInputStartRow = DASHBOARD_CONFIG.VALID_INPUT_FIRST_ROW;
-    validInputStartRow <= maxRows;
-    validInputStartRow += DASHBOARD_CONFIG.VALID_INPUT_BLOCK_INTERVAL
-  ) {
-    const validInputEndRow =
-      validInputStartRow + DASHBOARD_CONFIG.VALID_INPUT_BLOCK_HEIGHT - 1;
+  for (let i = 0; i < dateRows.length; i++) {
+    const dateBlockStartRow = dateRows[i];
+    const nextDateRow = i + 1 < dateRows.length ? dateRows[i + 1] : null;
+    const copyEndRow = nextDateRow ? nextDateRow - 1 : maxRows;
 
-    const hasInput = hasManualNumericInputInValidationBlock_(
+    const hasInput = hasManualNumericInputInDateBlock_(
+      values,
       displayValues,
       formulas,
-      validInputStartRow,
-      validInputEndRow
+      dateBlockStartRow,
+      copyEndRow
     );
 
     if (!hasInput) continue;
-
-    const dateBlockStartRow = findDateRowAtOrAbove_(
-      values,
-      displayValues,
-      validInputStartRow
-    );
-
-    if (!dateBlockStartRow) continue;
-
-    const nextDateRow = findNextDateRowAfter_(
-      values,
-      displayValues,
-      dateBlockStartRow
-    );
-
-    let copyEndRow;
-
-    if (nextDateRow) {
-      copyEndRow = nextDateRow - 1;
-    } else {
-      copyEndRow = Math.min(
-        maxRows,
-        dateBlockStartRow + DASHBOARD_CONFIG.FALLBACK_COPY_ROWS_AFTER_DATE - 1
-      );
-    }
 
     latestValid = {
       sheet,
       sheetName,
       monthIndex,
       hasValidInput: true,
-      validInputStartRow,
-      validInputEndRow,
+      validInputStartRow: dateBlockStartRow,
+      validInputEndRow: copyEndRow,
       dateBlockStartRow,
       nextDateRow,
       copyEndRow
@@ -299,7 +264,8 @@ function analyzeMonthlySheet_(sheet, sheetName, monthIndex) {
 }
 
 
-function hasManualNumericInputInValidationBlock_(
+function hasManualNumericInputInDateBlock_(
+  values,
   displayValues,
   formulas,
   startRow,
@@ -307,19 +273,22 @@ function hasManualNumericInputInValidationBlock_(
 ) {
   for (let rowNum = startRow; rowNum <= endRow; rowNum++) {
     const row = displayValues[rowNum - 1];
+    const valueRow = values[rowNum - 1];
     const formulaRow = formulas[rowNum - 1];
 
-    if (!row || !formulaRow) continue;
+    if (!row || !valueRow || !formulaRow) continue;
+    if (rowHasValidityExcludedLabel_(valueRow, row)) continue;
 
     for (
       let colNum = DASHBOARD_CONFIG.VALID_INPUT_FIRST_COL;
       colNum <= DASHBOARD_CONFIG.VALID_INPUT_LAST_COL;
       colNum++
     ) {
+      const value = valueRow[colNum - 1];
       const displayValue = row[colNum - 1];
       const formula = formulaRow[colNum - 1];
 
-      if (isManualNumericInput_(displayValue, formula)) {
+      if (isManualNumericInput_(value, displayValue, formula)) {
         return true;
       }
     }
@@ -329,11 +298,16 @@ function hasManualNumericInputInValidationBlock_(
 }
 
 
-function isManualNumericInput_(displayValue, formula) {
+function isManualNumericInput_(value, displayValue, formula) {
   if (String(formula ?? "").trim() !== "") {
     return false;
   }
 
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return DASHBOARD_CONFIG.COUNT_ZERO_AS_VALID_INPUT || value !== 0;
+  }
+
+  // 숫자 서식/로케일에 따라 getValues()가 문자열을 반환하는 경우를 보조 처리한다.
   const text = String(displayValue ?? "")
     .replace(/\u00A0/g, " ")
     .trim();
@@ -360,31 +334,33 @@ function isManualNumericInput_(displayValue, formula) {
 }
 
 
-/**
- * 특정 행 위쪽에서 가장 가까운 날짜 행 찾기
- */
-function findDateRowAtOrAbove_(values, displayValues, rowNum) {
-  for (let r = rowNum; r >= 1; r--) {
-    if (rowHasDate_(values[r - 1], displayValues[r - 1])) {
-      return r;
-    }
-  }
+function rowHasValidityExcludedLabel_(valueRow, displayRow) {
+  const cells = [];
 
-  return null;
+  if (valueRow) cells.push(...valueRow);
+  if (displayRow) cells.push(...displayRow);
+
+  return cells.some(cell => {
+    const text = String(cell ?? "")
+      .replace(/\u00A0/g, " ")
+      .trim()
+      .toUpperCase();
+
+    return /(^|[^А-ЯЁ])(ИТОГО|ВСЕГО)(?=$|[^А-ЯЁ])/.test(text);
+  });
 }
 
 
-/**
- * 특정 날짜 행 이후의 다음 날짜 행 찾기
- */
-function findNextDateRowAfter_(values, displayValues, startRow) {
-  for (let r = startRow + 1; r <= values.length; r++) {
+function findDateRows_(values, displayValues) {
+  const dateRows = [];
+
+  for (let r = 1; r <= values.length; r++) {
     if (rowHasDate_(values[r - 1], displayValues[r - 1])) {
-      return r;
+      dateRows.push(r);
     }
   }
 
-  return null;
+  return dateRows;
 }
 
 

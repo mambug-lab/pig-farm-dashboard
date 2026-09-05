@@ -1160,14 +1160,28 @@
       "1DcnLGcjh5m2zfilXzDLQCv7u6dOyzyXdUJol2Svk3IA";
 
 
-    const GID_CANDIDATES = [
-      "46976503",
-      ""
-    ];
+    const MONTHLY_LINK_SHEET_NAME =
+      "대시보드_월간연동용";
 
 
     const ANNUAL_LINK_SHEET_NAME =
       "대시보드_연간연동용";
+
+
+    const MONTHLY_DATA_RANGE =
+      "A1:I1215";
+
+
+    const MONTHLY_META_RANGE =
+      "K1:R10";
+
+
+    const MONTHLY_LATEST_DATE_RANGE =
+      "L3:L3";
+
+
+    const ANNUAL_SUMMARY_RANGE =
+      "K1:O30";
 
 
     const COL_SECTION = 0;
@@ -1699,7 +1713,9 @@
 
 
     let latestRows = [];
-    let latestGidUsed = "";
+    let latestMetaRows = [];
+    let latestDateRows = [];
+    let latestSourceUsed = "";
 
     let latestAnnualRows = [];
     let latestAnnualStats = null;
@@ -1808,7 +1824,9 @@
 
         renderDashboard(
           latestRows,
-          latestGidUsed
+          latestMetaRows,
+          latestDateRows,
+          latestSourceUsed
         );
       }
 
@@ -2467,186 +2485,17 @@
     }
 
 
-    function loadGvizRows(gid) {
-
-      return new Promise(
-        function(resolve,reject) {
-
-          clearOldJsonpScripts();
-
-
-          const callbackName =
-            "dashboard_" +
-            Date.now() +
-            "_" +
-            Math.floor(
-              Math.random() *
-              100000
-            );
-
-
-          const timer =
-            setTimeout(
-              function() {
-
-                cleanup();
-
-                reject(
-                  new Error(
-                    "Google 시트 응답 시간 초과"
-                  )
-                );
-
-              },
-              15000
-            );
-
-
-          function cleanup() {
-
-            clearTimeout(
-              timer
-            );
-
-
-            const script =
-              document.getElementById(
-                callbackName
-              );
-
-
-            if (script) {
-
-              script.remove();
-            }
-
-
-            try {
-
-              delete window[
-                callbackName
-              ];
-
-            } catch(e) {
-
-              window[
-                callbackName
-              ] = undefined;
-            }
-          }
-
-
-          window[
-            callbackName
-          ] =
-            function(response) {
-
-              try {
-
-                const rows =
-                  gvizResponseToRows(
-                    response
-                  );
-
-
-                cleanup();
-
-                resolve(rows);
-
-              } catch(err) {
-
-                cleanup();
-
-                reject(err);
-              }
-            };
-
-
-          const tqx =
-            encodeURIComponent(
-              "out:json;responseHandler:" +
-              callbackName
-            );
-
-
-          let url =
-
-            "https://docs.google.com/spreadsheets/d/" +
-
-            encodeURIComponent(
-              SHEET_ID
-            ) +
-
-            "/gviz/tq?tqx=" +
-
-            tqx +
-
-            "&headers=0&t=" +
-
-            Date.now();
-
-
-          if (gid) {
-
-            url +=
-              "&gid=" +
-              encodeURIComponent(
-                gid
-              );
-          }
-
-
-          const script =
-            document.createElement(
-              "script"
-            );
-
-
-          script.id =
-            callbackName;
-
-
-          script.dataset.gvizScript =
-            "true";
-
-
-          script.src =
-            url;
-
-
-          script.onerror =
-            function() {
-
-              cleanup();
-
-              reject(
-                new Error(
-                  "Google 시트 로딩 실패"
-                )
-              );
-            };
-
-
-          document.body.appendChild(
-            script
-          );
-        }
-      );
-    }
-
-
-    function loadGvizRowsBySheetName(
-      sheetName
+    function loadGvizRowsBySheetRange(
+      sheetName,
+      range,
+      requestLabel
     ) {
 
       return new Promise(
         function(resolve,reject) {
 
-          clearOldJsonpScripts();
-
-
           const callbackName =
-            "annual_" +
+            "dashboard_range_" +
             Date.now() +
             "_" +
             Math.floor(
@@ -2663,7 +2512,8 @@
 
                 reject(
                   new Error(
-                    "연간연동용 응답 시간 초과"
+                    requestLabel +
+                    " 응답 시간 초과"
                   )
                 );
 
@@ -2756,6 +2606,12 @@
               sheetName
             ) +
 
+            "&range=" +
+
+            encodeURIComponent(
+              range
+            ) +
+
             "&t=" +
 
             Date.now();
@@ -2784,7 +2640,8 @@
 
               reject(
                 new Error(
-                  "연간연동용 시트 로딩 실패"
+                  requestLabel +
+                  " 로딩 실패"
                 )
               );
             };
@@ -2826,7 +2683,7 @@
 
 
         for (
-          let c = 9;
+          let c = 0;
           c < row.length - 1;
           c++
         ) {
@@ -2851,14 +2708,53 @@
     }
 
 
-    function readMonthlyMetadata(
+    function readSingleCellValue(
       lines
     ) {
 
+      for (
+        let r = 0;
+        r < lines.length;
+        r++
+      ) {
+
+        const row =
+          lines[r] ||
+          [];
+
+
+        for (
+          let c = 0;
+          c < row.length;
+          c++
+        ) {
+
+          if (
+            row[c] !== null &&
+            row[c] !== undefined &&
+            displayText(
+              row[c]
+            ) !== ""
+          ) {
+
+            return row[c];
+          }
+        }
+      }
+
+
+      return null;
+    }
+
+
+    function readMonthlyMetadata(
+      lines,
+      latestDateLines
+    ) {
+
       const latestDateRaw =
-        findMetadataValue(
-          lines,
-          "최신 유효일"
+        readSingleCellValue(
+          latestDateLines
         );
 
 
@@ -2991,16 +2887,17 @@
 
 
     /*
-     * 연간연동용 K4:O...의 월별 집계표만 읽는다.
+     * 별도 조회한 연간연동용 K1:O30의 월별 집계표만 읽는다.
      *
      * HTML에서 원본 ВСЕГО를 다시 합산하지 않는다.
+     * 문자열 표식이 GViz 열 형식 추론으로 비어도,
+     * 연도/월 숫자행은 그대로 남으므로 해당 행만 선별한다.
      */
     function readAnnualMonthlySummary(
       lines
     ) {
 
-      let markerRow =
-        -1;
+      const result = [];
 
 
       for (
@@ -3014,65 +2911,23 @@
           [];
 
 
-        if (
-          displayText(
-            row[10]
-          ) ===
-          "월별 집계"
-        ) {
-
-          markerRow = r;
-
-          break;
-        }
-      }
-
-
-      if (
-        markerRow < 0
-      ) {
-
-        return [];
-      }
-
-
-      /*
-       * marker 다음행은 헤더,
-       * 그 다음부터 실제 데이터.
-       */
-      const startRow =
-        markerRow + 2;
-
-
-      const result = [];
-
-
-      for (
-        let r = startRow;
-        r < lines.length;
-        r++
-      ) {
-
-        const row =
-          lines[r] ||
-          [];
-
-
         const year =
           num(
-            row[10]
+            row[0]
           );
 
 
         const month =
           num(
-            row[11]
+            row[1]
           );
 
 
         if (
-          !year ||
-          !month
+          year < 2000 ||
+          year > 2100 ||
+          month < 1 ||
+          month > 12
         ) {
 
           continue;
@@ -3089,17 +2944,17 @@
 
           sale:
             num(
-              row[12]
+              row[2]
             ),
 
           loss:
             num(
-              row[13]
+              row[3]
             ),
 
           validDays:
             num(
-              row[14]
+              row[4]
             )
         });
       }
@@ -5023,15 +4878,25 @@
 
     function renderDashboard(
       lines,
-      gidUsed
+      metaLines,
+      dateLines,
+      sourceUsed
     ) {
 
       latestRows =
         lines;
 
 
-      latestGidUsed =
-        gidUsed;
+      latestMetaRows =
+        metaLines;
+
+
+      latestDateRows =
+        dateLines;
+
+
+      latestSourceUsed =
+        sourceUsed;
 
 
       applyStaticTexts();
@@ -5042,7 +4907,8 @@
        */
       const meta =
         readMonthlyMetadata(
-          lines
+          metaLines,
+          dateLines
         );
 
 
@@ -5234,13 +5100,8 @@
       );
 
 
-      const gidText =
-        gidUsed
-          ? (
-              "gid=" +
-              gidUsed
-            )
-          : "first sheet";
+      const sourceText =
+        sourceUsed;
 
 
       document.getElementById(
@@ -5251,7 +5112,7 @@
 
         사용 시트:
         ${escapeHtml(
-          gidText
+          sourceText
         )}<br>
 
         최신 유효 작업일:
@@ -5328,7 +5189,7 @@
           "statusSuccess"
         ) +
         " · " +
-        gidText +
+        sourceText +
         " · " +
         tr(
           "journalDate"
@@ -5347,14 +5208,14 @@
        연간현황 로드
     ========================================================= */
 
-    async function loadAnnualStatus() {
+    async function loadAnnualStatus(
+      annualRows
+    ) {
 
       try {
 
         latestAnnualRows =
-          await loadGvizRowsBySheetName(
-            ANNUAL_LINK_SHEET_NAME
-          );
+          annualRows;
 
 
         const summaryRows =
@@ -5492,68 +5353,73 @@
         '<div class="empty-message">Loading...</div>';
 
 
-      const errors = [];
+      clearOldJsonpScripts();
 
 
       try {
 
-        let loaded =
-          false;
+        const results =
+          await Promise.all([
+
+            loadGvizRowsBySheetRange(
+              MONTHLY_LINK_SHEET_NAME,
+              MONTHLY_DATA_RANGE,
+              "월간 작업일지 요청"
+            ),
+
+            loadGvizRowsBySheetRange(
+              MONTHLY_LINK_SHEET_NAME,
+              MONTHLY_META_RANGE,
+              "월간 메타 요청"
+            ),
+
+            loadGvizRowsBySheetRange(
+              MONTHLY_LINK_SHEET_NAME,
+              MONTHLY_LATEST_DATE_RANGE,
+              "최신 유효일 요청"
+            ),
+
+            loadGvizRowsBySheetRange(
+              ANNUAL_LINK_SHEET_NAME,
+              ANNUAL_SUMMARY_RANGE,
+              "연간 집계 요청"
+            )
+          ]);
 
 
-        for (
-          const gid of
-          GID_CANDIDATES
-        ) {
-
-          try {
-
-            const rows =
-              await loadGvizRows(
-                gid
-              );
+        const monthlyDataRows =
+          results[0];
 
 
-            renderDashboard(
-              rows,
-              gid
-            );
+        const monthlyMetaRows =
+          results[1];
 
 
-            loaded =
-              true;
+        const monthlyLatestDateRows =
+          results[2];
 
 
-            break;
+        const annualSummaryRows =
+          results[3];
 
 
-          } catch(err) {
-
-            errors.push(
-              (
-                gid
-                  ? (
-                      "gid=" +
-                      gid
-                    )
-                  : "first sheet"
-              ) +
-              ": " +
-              err.message
-            );
-          }
-        }
+        const sourceText =
+          MONTHLY_LINK_SHEET_NAME +
+          "!" +
+          MONTHLY_DATA_RANGE;
 
 
-        if (!loaded) {
+        renderDashboard(
+          monthlyDataRows,
+          monthlyMetaRows,
+          monthlyLatestDateRows,
+          sourceText
+        );
 
-          throw new Error(
-            "월간연동용 데이터를 읽지 못했습니다."
-          );
-        }
 
-
-        await loadAnnualStatus();
+        await loadAnnualStatus(
+          annualSummaryRows
+        );
 
 
         document.getElementById(
@@ -5598,11 +5464,36 @@
 
           <br><br>
 
-          ${errors
-            .map(
-              escapeHtml
-            )
-            .join("<br>")}
+          월간 작업일지 요청:
+          ${escapeHtml(
+            MONTHLY_LINK_SHEET_NAME +
+            "!" +
+            MONTHLY_DATA_RANGE
+          )}<br>
+
+          월간 메타 요청:
+          ${escapeHtml(
+            MONTHLY_LINK_SHEET_NAME +
+            "!" +
+            MONTHLY_META_RANGE
+          )}<br>
+
+          최신 유효일 요청:
+          ${escapeHtml(
+            MONTHLY_LINK_SHEET_NAME +
+            "!" +
+            MONTHLY_LATEST_DATE_RANGE
+          )}<br>
+
+          연간 집계 요청:
+          ${escapeHtml(
+            ANNUAL_LINK_SHEET_NAME +
+            "!" +
+            ANNUAL_SUMMARY_RANGE
+          )}<br><br>
+
+          연결 방식:
+          시트명 + 범위 직접 지정
         `;
 
 

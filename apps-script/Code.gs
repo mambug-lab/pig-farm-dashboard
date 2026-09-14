@@ -1,6 +1,6 @@
 /***************************************************************
  * 양돈장 대시보드 자동연동
- * Code.gs v11.0
+ * Code.gs v11.1
  *
  * =============================================================
  * [행 간격 제거 리팩터링]
@@ -43,6 +43,27 @@
  *
  * 11. HTML에서는 작업일 유효성 재판정 안 함
  *
+ * =============================================================
+ * [v11.1-RC1 성능/구조 리팩터링]
+ * =============================================================
+ *
+ * 기준 정본:
+ *   Code.gs v11.0
+ *   GitHub blob 8b9ec6b35f5c4021438caa078d453b5ac9a59d37
+ *
+ * 변경 범위:
+ *   - 실행 1회당 월별 원본 분석 1회로 통합
+ *   - 수집한 날짜행으로 다음 블록 시작행 재사용
+ *   - 분석 시 읽은 A:I 값을 연동용 복사에 재사용
+ *   - K:R 초기화를 명시된 관리 범위로 제한
+ *   - A1:J2 헤더 쓰기를 배치 처리
+ *   - 월간/연간 공통 MSY 메타 행 생성 통합
+ *
+ * 보류/유지:
+ *   - onEdit/onChange 트리거 구성 유지
+ *   - Dashboard L3 별도 GViz 요청은 이 파일의 범위 아님
+ *   - Dashboard 고정 상세 조회 범위는 이 파일의 범위 아님
+ *
  ***************************************************************/
 
 
@@ -59,6 +80,12 @@ const DASHBOARD_CONFIG = {
   MAX_DATA_COLS: 9,
 
   OUTPUT_START_ROW: 3,
+
+  /*
+   * Dashboard가 사용하는 KPI/월별 요약 관리 영역.
+   * 이전 요약의 잔존값 제거를 포함해 K:R 1~30행만 관리한다.
+   */
+  METADATA_MANAGED_ROWS: 30,
 
 
   /*
@@ -237,8 +264,14 @@ function refreshDashboardLinks() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const dailyRecords =
-    collectAnnualDailyKpiRecords_(ss);
+    collectAnnualDailyKpiRecords_(
+      monthlyAnalyses
+    );
 
 
   const msySummary =
@@ -261,6 +294,7 @@ function refreshDashboardLinks() {
 
   refreshMonthlyLinkSheetInternal_(
     ss,
+    monthlyAnalyses,
     msySummary,
     latestMonthSummary
   );
@@ -268,6 +302,7 @@ function refreshDashboardLinks() {
 
   refreshAnnualLinkSheetInternal_(
     ss,
+    monthlyAnalyses,
     msySummary,
     annualMonthlySummary
   );
@@ -284,8 +319,14 @@ function refreshMonthlyLinkSheet() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const dailyRecords =
-    collectAnnualDailyKpiRecords_(ss);
+    collectAnnualDailyKpiRecords_(
+      monthlyAnalyses
+    );
 
 
   const msySummary =
@@ -302,6 +343,7 @@ function refreshMonthlyLinkSheet() {
 
   refreshMonthlyLinkSheetInternal_(
     ss,
+    monthlyAnalyses,
     msySummary,
     latestMonthSummary
   );
@@ -318,8 +360,14 @@ function refreshAnnualLinkSheet() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const dailyRecords =
-    collectAnnualDailyKpiRecords_(ss);
+    collectAnnualDailyKpiRecords_(
+      monthlyAnalyses
+    );
 
 
   const msySummary =
@@ -336,6 +384,7 @@ function refreshAnnualLinkSheet() {
 
   refreshAnnualLinkSheetInternal_(
     ss,
+    monthlyAnalyses,
     msySummary,
     annualMonthlySummary
   );
@@ -348,6 +397,7 @@ function refreshAnnualLinkSheet() {
 
 function refreshMonthlyLinkSheetInternal_(
   ss,
+  monthlyAnalyses,
   msySummary,
   latestMonthSummary
 ) {
@@ -381,7 +431,9 @@ function refreshMonthlyLinkSheetInternal_(
 
 
   const latestInfo =
-    findLatestMonthlySheetWithValidData_(ss);
+    findLatestMonthlySheetWithValidData_(
+      monthlyAnalyses
+    );
 
 
   writeMonthlyHeader_(
@@ -411,9 +463,8 @@ function refreshMonthlyLinkSheetInternal_(
 
 
   const values =
-    readMonthValuesUntilRow_(
-      latestInfo.sheet,
-      latestInfo.copyEndRow
+    getMonthlyOutputValues_(
+      latestInfo
     );
 
 
@@ -469,6 +520,7 @@ function refreshMonthlyLinkSheetInternal_(
 
 function refreshAnnualLinkSheetInternal_(
   ss,
+  monthlyAnalyses,
   msySummary,
   annualMonthlySummary
 ) {
@@ -513,39 +565,14 @@ function refreshAnnualLinkSheetInternal_(
   );
 
 
-  const allRows = [];
+  let allRows = [];
 
   const usedSheetNames = [];
 
 
-  DASHBOARD_CONFIG.MONTHS_RU
+  monthlyAnalyses
     .forEach(
-      function(monthName, index) {
-
-        const sheetName =
-          monthName +
-          " " +
-          DASHBOARD_CONFIG.YEAR;
-
-
-        const sheet =
-          ss.getSheetByName(
-            sheetName
-          );
-
-
-        if (!sheet) {
-          return;
-        }
-
-
-        const info =
-          analyzeMonthlySheet_(
-            sheet,
-            sheetName,
-            index + 1
-          );
-
+      function(info) {
 
         if (
           !info ||
@@ -557,9 +584,8 @@ function refreshAnnualLinkSheetInternal_(
 
 
         const values =
-          readMonthValuesUntilRow_(
-            sheet,
-            info.copyEndRow
+          getMonthlyOutputValues_(
+            info
           );
 
 
@@ -568,18 +594,14 @@ function refreshAnnualLinkSheetInternal_(
         }
 
 
-        values.forEach(
-          function(row) {
-
-            allRows.push(
-              row
-            );
-          }
-        );
+        allRows =
+          allRows.concat(
+            values
+          );
 
 
         usedSheetNames.push(
-          sheetName +
+          info.sheetName +
           " / 유효 " +
           info.validCount +
           "일 / ~" +
@@ -625,12 +647,12 @@ function refreshAnnualLinkSheetInternal_(
 
 
 /***************************************************************
- * 최신 유효 월
+ * 실행 1회용 월별 분석 컨텍스트
  ***************************************************************/
 
-function findLatestMonthlySheetWithValidData_(ss) {
+function collectMonthlyAnalyses_(ss) {
 
-  const candidates = [];
+  const analyses = [];
 
 
   DASHBOARD_CONFIG.MONTHS_RU
@@ -654,25 +676,40 @@ function findLatestMonthlySheetWithValidData_(ss) {
         }
 
 
-        const info =
+        analyses.push(
           analyzeMonthlySheet_(
             sheet,
             sheetName,
             index + 1
-          );
-
-
-        if (
-          info &&
-          info.hasValidInput
-        ) {
-
-          candidates.push(
-            info
-          );
-        }
+          )
+        );
       }
     );
+
+
+  return analyses;
+}
+
+
+/***************************************************************
+ * 최신 유효 월
+ ***************************************************************/
+
+function findLatestMonthlySheetWithValidData_(
+  monthlyAnalyses
+) {
+
+  const candidates =
+    (monthlyAnalyses || [])
+      .filter(
+        function(info) {
+
+          return (
+            info &&
+            info.hasValidInput
+          );
+        }
+      );
 
 
   if (!candidates.length) {
@@ -797,11 +834,7 @@ function analyzeMonthlySheet_(
 
 
     const nextDateRow =
-      findNextDateRowAfter_(
-        scan.values,
-        scan.displayValues,
-        current.row
-      );
+      current.nextDateRow;
 
 
     const blockEndRow =
@@ -1026,6 +1059,11 @@ function collectDateRowsForMonth_(
 
   const result = [];
 
+  const allDateRows = [];
+
+  const seenDateKeys =
+    new Set();
+
 
   for (
     let rowNum = 1;
@@ -1049,6 +1087,37 @@ function collectDateRowsForMonth_(
     }
 
 
+    const item = {
+
+      row:
+        rowNum,
+
+      date:
+        new Date(
+          date.getFullYear(),
+          date.getMonth(),
+          date.getDate()
+        ),
+
+      nextDateRow:
+        null
+    };
+
+
+    if (allDateRows.length) {
+
+      allDateRows[
+        allDateRows.length - 1
+      ].nextDateRow =
+        rowNum;
+    }
+
+
+    allDateRows.push(
+      item
+    );
+
+
     if (
       date.getFullYear() !==
         DASHBOARD_CONFIG.YEAR ||
@@ -1060,66 +1129,37 @@ function collectDateRowsForMonth_(
     }
 
 
-    result.push({
+    /*
+     * 같은 날짜가 여러 행에서 발견될 경우
+     * 최초 날짜행만 사용한다.
+     *
+     * nextDateRow는 월/연도와 무관한 바로 다음 날짜행이다.
+     * 기존 findNextDateRowAfter_()의 경계 판정을 그대로 보존한다.
+     */
+    const key =
+      dateKey_(
+        item.date
+      );
 
-      row:
-        rowNum,
 
-      date:
-        new Date(
-          date.getFullYear(),
-          date.getMonth(),
-          date.getDate()
-        )
-    });
+    if (
+      !seenDateKeys.has(
+        key
+      )
+    ) {
+
+      seenDateKeys.add(
+        key
+      );
+
+      result.push(
+        item
+      );
+    }
   }
 
 
-  /*
-   * 같은 날짜가 여러 행에서 발견될 경우
-   * 최초 날짜행만 사용
-   */
-  const map =
-    new Map();
-
-
-  result.forEach(
-    function(item) {
-
-      const key =
-        dateKey_(
-          item.date
-        );
-
-
-      if (
-        !map.has(
-          key
-        )
-      ) {
-
-        map.set(
-          key,
-          item
-        );
-      }
-    }
-  );
-
-
-  return Array
-    .from(
-      map.values()
-    )
-    .sort(
-      function(a, b) {
-
-        return (
-          a.row -
-          b.row
-        );
-      }
-    );
+  return result;
 }
 
 
@@ -1549,59 +1589,6 @@ function isManualNumericInput_(
 
 
 /***************************************************************
- * 다음 날짜행 찾기
- ***************************************************************/
-
-function findNextDateRowAfter_(
-  values,
-  displayValues,
-  startRow
-) {
-
-  for (
-    let r =
-      startRow + 1;
-
-    r <= values.length;
-
-    r++
-  ) {
-
-    if (
-      rowHasDate_(
-        values[
-          r - 1
-        ],
-        displayValues[
-          r - 1
-        ]
-      )
-    ) {
-
-      return r;
-    }
-  }
-
-
-  return null;
-}
-
-
-function rowHasDate_(
-  valueRow,
-  displayRow
-) {
-
-  return (
-    getDateFromRow_(
-      valueRow,
-      displayRow
-    ) !== null
-  );
-}
-
-
-/***************************************************************
  * 행에서 날짜 찾기
  ***************************************************************/
 
@@ -1771,40 +1758,17 @@ function parseDateFromCell_(value) {
  * 연간 KPI 기록 수집
  ***************************************************************/
 
-function collectAnnualDailyKpiRecords_(ss) {
+function collectAnnualDailyKpiRecords_(
+  monthlyAnalyses
+) {
 
   const recordMap =
     new Map();
 
 
-  DASHBOARD_CONFIG.MONTHS_RU
+  (monthlyAnalyses || [])
     .forEach(
-      function(monthName, index) {
-
-        const sheetName =
-          monthName +
-          " " +
-          DASHBOARD_CONFIG.YEAR;
-
-
-        const sheet =
-          ss.getSheetByName(
-            sheetName
-          );
-
-
-        if (!sheet) {
-          return;
-        }
-
-
-        const info =
-          analyzeMonthlySheet_(
-            sheet,
-            sheetName,
-            index + 1
-          );
-
+      function(info) {
 
         if (
           !info ||
@@ -1822,7 +1786,7 @@ function collectAnnualDailyKpiRecords_(ss) {
               extractDailyKpiFromBlock_(
                 info.scan,
                 block,
-                sheetName
+                info.sheetName
               );
 
 
@@ -2638,32 +2602,10 @@ function createEmptyMsyResult_(
 
 
 /***************************************************************
- * 월간 메타정보 K:R
+ * 월간/연간 공통 MSY 메타정보 2행 생성
  ***************************************************************/
 
-function writeMonthlyDashboardMetadata_(
-  sheet,
-  msy,
-  month,
-  latestInfo
-) {
-
-  ensureColumns_(
-    sheet,
-    18
-  );
-
-
-  const latestValidDate =
-    (
-      latestInfo &&
-      latestInfo.latestDate
-    )
-      ? formatDateForDisplay_(
-          latestInfo.latestDate
-        )
-      : "";
-
+function buildMsyMetadataRows_(msy) {
 
   const msyStartDate =
     (
@@ -2687,7 +2629,7 @@ function writeMonthlyDashboardMetadata_(
       : "";
 
 
-  const rows = [
+  return [
 
     [
       "누적 예상 MSY",
@@ -2750,8 +2692,46 @@ function writeMonthlyDashboardMetadata_(
           ? msy.validDiaryDays
           : 0
       )
-    ],
+    ]
+  ];
+}
 
+
+/***************************************************************
+ * 월간 메타정보 K:R
+ ***************************************************************/
+
+function writeMonthlyDashboardMetadata_(
+  sheet,
+  msy,
+  month,
+  latestInfo
+) {
+
+  ensureColumns_(
+    sheet,
+    18
+  );
+
+
+  const latestValidDate =
+    (
+      latestInfo &&
+      latestInfo.latestDate
+    )
+      ? formatDateForDisplay_(
+          latestInfo.latestDate
+        )
+      : "";
+
+
+  const rows =
+    buildMsyMetadataRows_(
+      msy
+    );
+
+
+  rows.push(
 
     [
       "최신 유효일",
@@ -2818,7 +2798,7 @@ function writeMonthlyDashboardMetadata_(
           : ""
       )
     ]
-  ];
+  );
 
 
   sheet
@@ -2864,100 +2844,17 @@ function writeAnnualMetadata_(
   );
 
 
-  const msyStartDate =
-    (
-      msy &&
-      msy.startDate
-    )
-      ? formatDateForDisplay_(
-          msy.startDate
-        )
-      : "";
-
-
-  const msyEndDate =
-    (
-      msy &&
-      msy.endDate
-    )
-      ? formatDateForDisplay_(
-          msy.endDate
-        )
-      : "";
-
-
-  const msyRows = [
-
-    [
-      "누적 예상 MSY",
-
-      (
-        msy &&
-        msy.msy !== null
-          ? msy.msy
-          : ""
-      ),
-
-      "MSY 상태",
-
-      (
-        msy
-          ? msy.status
-          : ""
-      ),
-
-      "MSY 시작일",
-
-      msyStartDate,
-
-      "MSY 종료일",
-
-      msyEndDate
-    ],
-
-
-    [
-      "MSY 누적 출하",
-
-      (
-        msy
-          ? msy.cumulativeSale
-          : 0
-      ),
-
-      "MSY 평균 모돈",
-
-      (
-        msy &&
-        msy.avgSow !== null
-          ? msy.avgSow
-          : ""
-      ),
-
-      "MSY 누적 달력일",
-
-      (
-        msy
-          ? msy.elapsedDays
-          : 0
-      ),
-
-      "MSY 유효 작업일",
-
-      (
-        msy
-          ? msy.validDiaryDays
-          : 0
-      )
-    ]
-  ];
+  const msyRows =
+    buildMsyMetadataRows_(
+      msy
+    );
 
 
   sheet
     .getRange(
       1,
       11,
-      2,
+      msyRows.length,
       8
     )
     .setValues(
@@ -2980,20 +2877,20 @@ function writeAnnualMetadata_(
 
 
   sheet
-    .getRange("K4")
-    .setValue(
-      "월별 집계"
-    );
-
-
-  sheet
     .getRange(
-      5,
+      4,
       11,
-      1,
+      2,
       5
     )
     .setValues([
+      [
+        "월별 집계",
+        "",
+        "",
+        "",
+        ""
+      ],
       [
         "연도",
         "월",
@@ -3060,125 +2957,59 @@ function writeMonthlyHeader_(
   latestInfo
 ) {
 
-  sheet
-    .getRange("A1")
-    .setValue(
-      "연동 월"
-    );
+  const rows = [
 
+    [
+      "연동 월",
 
-  sheet
-    .getRange("B1")
-    .setValue(
       latestInfo
         ? latestInfo.sheetName
-        : ""
-    );
+        : "",
 
+      "복사 종료 행",
 
-  sheet
-    .getRange("C1")
-    .setValue(
-      "복사 종료 행"
-    );
-
-
-  sheet
-    .getRange("D1")
-    .setValue(
       latestInfo
         ? latestInfo.copyEndRow
-        : ""
-    );
+        : "",
 
+      "최신 날짜행",
 
-  sheet
-    .getRange("E1")
-    .setValue(
-      "최신 날짜행"
-    );
-
-
-  sheet
-    .getRange("F1")
-    .setValue(
       latestInfo
         ? latestInfo.dateBlockStartRow
-        : ""
-    );
+        : "",
 
+      "다음 날짜행",
 
-  sheet
-    .getRange("G1")
-    .setValue(
-      "다음 날짜행"
-    );
-
-
-  sheet
-    .getRange("H1")
-    .setValue(
-      latestInfo &&
-      latestInfo.nextDateRow
+      (
+        latestInfo &&
+        latestInfo.nextDateRow
+      )
         ? latestInfo.nextDateRow
-        : ""
-    );
+        : "",
 
+      "유효성 판정",
 
-  sheet
-    .getRange("I1")
-    .setValue(
-      "유효성 판정"
-    );
-
-
-  sheet
-    .getRange("J1")
-    .setValue(
       "A열 앵커 + E:H 직접입력"
-    );
+    ],
 
 
-  sheet
-    .getRange("A2")
-    .setValue(
-      "설명"
-    );
+    [
+      "설명",
 
+      "행 간격 비의존 / 날짜 블록 기준 자동 탐색",
 
-  sheet
-    .getRange("B2")
-    .setValue(
-      "행 간격 비의존 / 날짜 블록 기준 자동 탐색"
-    );
+      "",
 
+      "",
 
-  sheet
-    .getRange("E2")
-    .setValue(
-      "유효 작업일 수"
-    );
+      "유효 작업일 수",
 
-
-  sheet
-    .getRange("F2")
-    .setValue(
       latestInfo
         ? latestInfo.validCount
-        : 0
-    );
+        : 0,
 
+      "최신 앵커 입력",
 
-  sheet
-    .getRange("G2")
-    .setValue(
-      "최신 앵커 입력"
-    );
-
-
-  sheet
-    .getRange("H2")
-    .setValue(
       latestInfo
         ? (
             latestInfo.inputAnchorCount +
@@ -3187,7 +3018,24 @@ function writeMonthlyHeader_(
               .INPUT_ANCHORS
               .length
           )
-        : ""
+        : "",
+
+      "",
+
+      ""
+    ]
+  ];
+
+
+  sheet
+    .getRange(
+      1,
+      1,
+      rows.length,
+      10
+    )
+    .setValues(
+      rows
     );
 }
 
@@ -3198,45 +3046,64 @@ function writeMonthlyHeader_(
 
 function writeAnnualHeader_(sheet) {
 
-  sheet
-    .getRange("A1")
-    .setValue(
-      DASHBOARD_CONFIG.YEAR
-    );
+  const rows = [
+
+    [
+      DASHBOARD_CONFIG.YEAR,
+
+      "연간 연동용",
+
+      "설명",
+
+      "날짜블록 + A열 앵커 + E:H 직접입력 기준",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      ""
+    ],
+
+
+    [
+      "용도",
+
+      "월별 출하·폐사 / 연간누적 / 추이그래프",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      "",
+
+      ""
+    ]
+  ];
 
 
   sheet
-    .getRange("B1")
-    .setValue(
-      "연간 연동용"
-    );
-
-
-  sheet
-    .getRange("C1")
-    .setValue(
-      "설명"
-    );
-
-
-  sheet
-    .getRange("D1")
-    .setValue(
-      "날짜블록 + A열 앵커 + E:H 직접입력 기준"
-    );
-
-
-  sheet
-    .getRange("A2")
-    .setValue(
-      "용도"
-    );
-
-
-  sheet
-    .getRange("B2")
-    .setValue(
-      "월별 출하·폐사 / 연간누적 / 추이그래프"
+    .getRange(
+      1,
+      1,
+      rows.length,
+      10
+    )
+    .setValues(
+      rows
     );
 }
 
@@ -3251,8 +3118,14 @@ function showValidationAudit() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const latest =
-    findLatestMonthlySheetWithValidData_(ss);
+    findLatestMonthlySheetWithValidData_(
+      monthlyAnalyses
+    );
 
 
   if (!latest) {
@@ -3351,8 +3224,14 @@ function showAnchorStructureAudit() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const latest =
-    findLatestMonthlySheetWithValidData_(ss);
+    findLatestMonthlySheetWithValidData_(
+      monthlyAnalyses
+    );
 
 
   if (!latest) {
@@ -3464,8 +3343,14 @@ function showCumulativeMsySummary() {
     SpreadsheetApp.getActiveSpreadsheet();
 
 
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(ss);
+
+
   const records =
-    collectAnnualDailyKpiRecords_(ss);
+    collectAnnualDailyKpiRecords_(
+      monthlyAnalyses
+    );
 
 
   const result =
@@ -3917,32 +3802,37 @@ function columnNumberToLetter_(column) {
 
 
 /***************************************************************
- * 원본 데이터 읽기
+ * 분석 시 읽은 원본 A:I에서 출력값 구성
  ***************************************************************/
 
-function readMonthValuesUntilRow_(
-  sheet,
-  copyEndRow
-) {
+function getMonthlyOutputValues_(analysis) {
+
+  if (
+    !analysis ||
+    !analysis.scan ||
+    !analysis.scan.values ||
+    !analysis.copyEndRow
+  ) {
+
+    return [];
+  }
+
 
   const safeEndRow =
     Math.max(
       1,
       Math.min(
-        copyEndRow,
-        sheet.getLastRow()
+        analysis.copyEndRow,
+        analysis.scan.lastRow,
+        analysis.scan.values.length
       )
     );
 
 
-  return sheet
-    .getRange(
-      1,
-      1,
-      safeEndRow,
-      DASHBOARD_CONFIG.MAX_DATA_COLS
-    )
-    .getValues();
+  return analysis.scan.values.slice(
+    0,
+    safeEndRow
+  );
 }
 
 
@@ -4000,7 +3890,7 @@ function clearOutputArea_(sheet) {
 
 
 /***************************************************************
- * K:R 초기화
+ * K:R 관리 영역 초기화
  ***************************************************************/
 
 function clearMetadataArea_(sheet) {
@@ -4011,11 +3901,24 @@ function clearMetadataArea_(sheet) {
   );
 
 
+  const clearRows =
+    Math.min(
+      sheet.getMaxRows(),
+      DASHBOARD_CONFIG
+        .METADATA_MANAGED_ROWS
+    );
+
+
+  if (clearRows < 1) {
+    return;
+  }
+
+
   sheet
     .getRange(
       1,
       11,
-      sheet.getMaxRows(),
+      clearRows,
       8
     )
     .clearContent();

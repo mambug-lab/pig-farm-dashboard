@@ -155,17 +155,62 @@
     }
 
 
-    .language-select {
-      height:40px;
-      padding:0 10px;
-      border:1px solid #cbd5e1;
-      border-radius:8px;
-      background:#fff;
-      font-size:.92rem;
-      font-weight:700;
-      color:var(--main);
-      cursor:pointer;
-    }
+   /* =========================================================
+   언어 선택 - 국기 버튼
+========================================================= */
+
+.language-switcher {
+  display:flex;
+  align-items:center;
+  gap:6px;
+  padding:3px;
+  background:#f3f6f8;
+  border:1px solid #d8dee5;
+  border-radius:10px;
+}
+
+.lang-btn {
+  width:46px;
+  height:36px;
+  padding:3px;
+  border:2px solid transparent;
+  border-radius:7px;
+  background:transparent;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  cursor:pointer;
+  transition:
+    border-color .15s ease,
+    background .15s ease,
+    box-shadow .15s ease,
+    transform .15s ease;
+}
+
+.lang-btn:hover {
+  background:#ffffff;
+  transform:translateY(-1px);
+}
+
+.lang-btn.active {
+  background:#ffffff;
+  border-color:var(--main);
+  box-shadow:0 1px 5px rgba(0,0,0,.14);
+}
+
+.lang-btn:focus-visible {
+  outline:3px solid rgba(1,105,111,.25);
+  outline-offset:2px;
+}
+
+.lang-flag {
+  width:34px;
+  height:23px;
+  object-fit:cover;
+  display:block;
+  border-radius:2px;
+  box-shadow:0 0 0 1px rgba(0,0,0,.12);
+}
 
 
     .btn {
@@ -734,9 +779,19 @@
       }
 
 
-      .language-select,
-      .btn {
-        width:100%;
+     .language-switcher {
+  width:auto;
+  align-self:flex-start;
+}
+
+.lang-btn {
+  width:46px;
+  flex:0 0 46px;
+}
+
+.btn {
+  width:100%;
+}
       }
     }
 
@@ -794,21 +849,53 @@
 
     <div class="top-actions">
 
-      <select
-        class="language-select"
-        id="language-select"
-        onchange="changeLanguage(this.value)"
-      >
+<div
+  class="language-switcher"
+  id="language-switcher"
+  role="group"
+  aria-label="언어 선택"
+>
 
-        <option value="ko">
-          한국어
-        </option>
+  <button
+    type="button"
+    class="lang-btn"
+    data-lang="ko"
+    onclick="changeLanguage('ko')"
+    title="한국어"
+    aria-label="한국어로 변경"
+    aria-pressed="false"
+  >
+    <img
+      class="lang-flag"
+      src="https://flagcdn.com/w80/kr.png"
+      srcset="
+        https://flagcdn.com/w160/kr.png 2x
+      "
+      alt="대한민국 국기"
+    >
+  </button>
 
-        <option value="ru">
-          Русский
-        </option>
 
-      </select>
+  <button
+    type="button"
+    class="lang-btn"
+    data-lang="ru"
+    onclick="changeLanguage('ru')"
+    title="Русский"
+    aria-label="Переключить на русский язык"
+    aria-pressed="false"
+  >
+    <img
+      class="lang-flag"
+      src="https://flagcdn.com/w80/ru.png"
+      srcset="
+        https://flagcdn.com/w160/ru.png 2x
+      "
+      alt="Флаг России"
+    >
+  </button>
+
+</div>
 
 
       <button
@@ -1762,54 +1849,82 @@
     }
 
 
-    function applyStaticTexts() {
+function updateLanguageButtons() {
 
-      document.title =
-        tr(
-          "pageTitle"
+  const currentLang =
+    getLang();
+
+
+  document
+    .querySelectorAll(
+      ".lang-btn"
+    )
+    .forEach(
+      function(button) {
+
+        const isActive =
+          button.dataset.lang ===
+          currentLang;
+
+
+        button.classList.toggle(
+          "active",
+          isActive
         );
 
 
-      const selector =
-        document.getElementById(
-          "language-select"
+        button.setAttribute(
+          "aria-pressed",
+          isActive
+            ? "true"
+            : "false"
         );
-
-
-      if (selector) {
-
-        selector.value =
-          getLang();
       }
+    );
+}
 
 
-      document
-        .querySelectorAll(
-          "[data-i18n]"
-        )
-        .forEach(
-          function(el) {
+function applyStaticTexts() {
 
-            const key =
-              el.getAttribute(
-                "data-i18n"
-              );
+  document.title =
+    tr(
+      "pageTitle"
+    );
 
 
-            el.textContent =
-              tr(key);
-          }
-        );
+  /*
+   * 현재 선택 언어에 맞게
+   * 국기 버튼 활성상태 갱신
+   */
+  updateLanguageButtons();
 
 
-      document.getElementById(
-        "main-note"
-      ).textContent =
-        tr(
-          "mainNote"
-        );
-    }
+  document
+    .querySelectorAll(
+      "[data-i18n]"
+    )
+    .forEach(
+      function(el) {
 
+        const key =
+          el.getAttribute(
+            "data-i18n"
+          );
+
+
+        el.textContent =
+          tr(key);
+      }
+    );
+
+
+  document.getElementById(
+    "main-note"
+  ).textContent =
+    tr(
+      "mainNote"
+    );
+}
 
     function changeLanguage(lang) {
 

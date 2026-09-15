@@ -1,6 +1,6 @@
 /***************************************************************
  * 양돈장 대시보드 자동연동
- * Code.gs v11.1
+ * Code.gs v11.2-RC1 (돈사/돈방별 비정기 실사보정)
  *
  * =============================================================
  * [행 간격 제거 리팩터링]
@@ -59,8 +59,16 @@
  *   - A1:J2 헤더 쓰기를 배치 처리
  *   - 월간/연간 공통 MSY 메타 행 생성 통합
  *
+ * [v11.2-RC1 실사보정]
+ *   - 원본 월작업일지 J열을 선택형 실사두수 입력으로 사용
+ *   - 날짜/돈사/돈방은 같은 작업일 블록의 A/C열에서 자동 인식
+ *   - 돈사/돈방별 실사값을 해당 날짜의 확정 재고로 적용
+ *   - 보정 차이를 다음 실사일까지 전일/금일 재고에 승계
+ *   - 판매/폐사/분만 원인은 실사값만으로 추정하지 않음
+ *   - 연동용 출력은 기존 A:I, K:R, K:O 계약 유지
+ *
  * 보류/유지:
- *   - onEdit/onChange 트리거 구성 유지
+ *   - onEdit/onChange 트리거 구성은 별도 검증 단계에서 정리
  *   - Dashboard L3 별도 GViz 요청은 이 파일의 범위 아님
  *   - Dashboard 고정 상세 조회 범위는 이 파일의 범위 아님
  *
@@ -78,6 +86,17 @@ const DASHBOARD_CONFIG = {
     "대시보드_연간연동용",
 
   MAX_DATA_COLS: 9,
+
+  /*
+   * 원본은 A:I 작업일지 + J 실사두수를 읽는다.
+   * Dashboard 연동 출력은 기존 A:I 9열을 유지한다.
+   */
+  SOURCE_DATA_COLS: 10,
+
+  INVENTORY_AUDIT_COL: 10,  // J
+
+  INVENTORY_AUDIT_HEADER:
+    "Факт. поголовье",
 
   OUTPUT_START_ROW: 3,
 
@@ -215,6 +234,18 @@ function onOpen() {
     .addItem(
       "누적 MSY 진단 로그",
       "showCumulativeMsySummary"
+    )
+
+    .addItem(
+      "실사보정 진단 로그",
+      "showInventoryAuditSummary"
+    )
+
+    .addSeparator()
+
+    .addItem(
+      "실사두수 J열 입력란 설정",
+      "setupInventoryAuditInputColumn"
     )
 
     .addSeparator()
@@ -687,6 +718,11 @@ function collectMonthlyAnalyses_(ss) {
     );
 
 
+  applyInventoryAuditAdjustments_(
+    analyses
+  );
+
+
   return analyses;
 }
 
@@ -754,7 +790,7 @@ function scanMonthlySheet_(sheet) {
       1,
       1,
       lastRow,
-      DASHBOARD_CONFIG.MAX_DATA_COLS
+      DASHBOARD_CONFIG.SOURCE_DATA_COLS
     );
 
 
@@ -851,6 +887,14 @@ function analyzeMonthlySheet_(
       );
 
 
+    const inventoryAudit =
+      inspectInventoryAuditInputsInBlock_(
+        scan,
+        current.row,
+        blockEndRow
+      );
+
+
     const block = {
 
       date:
@@ -880,8 +924,17 @@ function analyzeMonthlySheet_(
       missingAnchors:
         validation.missingAnchors,
 
+      inventoryAuditCount:
+        inventoryAudit.count,
+
+      inventoryAuditCells:
+        inventoryAudit.cells,
+
       hasValidInput:
-        validation.hasValidInput
+        (
+          validation.hasValidInput ||
+          inventoryAudit.count > 0
+        )
     };
 
 
@@ -891,7 +944,7 @@ function analyzeMonthlySheet_(
 
 
     if (
-      validation.hasValidInput
+      block.hasValidInput
     ) {
 
       validBlocks.push(
@@ -982,7 +1035,20 @@ function analyzeMonthlySheet_(
       latest.inputAnchorCount,
 
     missingAnchors:
-      latest.missingAnchors
+      latest.missingAnchors,
+
+    inventoryAuditCount:
+      validBlocks.reduce(
+        function(sum, block) {
+          return (
+            sum +
+            Number(
+              block.inventoryAuditCount || 0
+            )
+          );
+        },
+        0
+      )
   };
 }
 
@@ -1043,6 +1109,12 @@ function createEmptyMonthlyAnalysis_(
       0,
 
     missingAnchors:
+      [],
+
+    inventoryAuditCount:
+      0,
+
+    outputValues:
       []
   };
 }
@@ -1427,6 +1499,167 @@ function inspectAnchorInputsInBlock_(
 
 
 /***************************************************************
+ * 작업일 블록의 J열 실사두수 검사
+ *
+ * - J열 직접입력 숫자만 인정
+ * - 수식은 실사입력으로 인정하지 않음
+ * - I열에 재고 숫자가 있는 상세행만 대상
+ * - ИТОГО / ВСЕГО 합계행 입력은 제외
+ ***************************************************************/
+
+function inspectInventoryAuditInputsInBlock_(
+  scan,
+  startRow,
+  endRow
+) {
+
+  const cells = [];
+
+
+  let inAggregateSummary =
+    false;
+
+
+  for (
+    let rowNum = startRow;
+    rowNum <= endRow;
+    rowNum++
+  ) {
+
+    const valueRow =
+      scan.values[
+        rowNum - 1
+      ];
+
+
+    const displayRow =
+      scan.displayValues[
+        rowNum - 1
+      ];
+
+
+    const formulaRow =
+      scan.formulas[
+        rowNum - 1
+      ];
+
+
+    if (
+      !valueRow ||
+      !displayRow ||
+      !formulaRow
+    ) {
+
+      continue;
+    }
+
+
+    const section =
+      cellText_(
+        displayRow,
+        valueRow,
+        0
+      );
+
+
+    const sub =
+      cellText_(
+        displayRow,
+        valueRow,
+        2
+      );
+
+
+    if (
+      isSubTotalLabel_(section) ||
+      isSubTotalLabel_(sub)
+    ) {
+
+      inAggregateSummary =
+        true;
+
+      continue;
+    }
+
+
+    if (
+      isGrandTotalLabel_(section) ||
+      isGrandTotalLabel_(sub)
+    ) {
+
+      continue;
+    }
+
+
+    if (
+      section &&
+      !isAnyTotalLabel_(
+        section
+      )
+    ) {
+
+      inAggregateSummary =
+        false;
+    }
+
+
+    if (
+      inAggregateSummary &&
+      !section
+    ) {
+
+      continue;
+    }
+
+
+    if (
+      !hasNumericCell_(
+        displayRow,
+        valueRow,
+        8
+      )
+    ) {
+
+      continue;
+    }
+
+
+    const audit =
+      manualInventoryAuditValue_(
+        displayRow,
+        valueRow,
+        formulaRow,
+        DASHBOARD_CONFIG
+          .INVENTORY_AUDIT_COL - 1
+      );
+
+
+    if (!audit.hasValue) {
+      continue;
+    }
+
+
+    cells.push(
+      columnNumberToLetter_(
+        DASHBOARD_CONFIG
+          .INVENTORY_AUDIT_COL
+      ) +
+      rowNum
+    );
+  }
+
+
+  return {
+    count:
+      cells.length,
+
+    cells:
+      cells
+  };
+}
+
+
+/***************************************************************
  * 앵커 검색
  ***************************************************************/
 
@@ -1602,27 +1835,37 @@ function getDateFromRow_(
 
   if (valueRow) {
 
-    valueRow.forEach(
-      function(value) {
+    valueRow
+      .slice(
+        0,
+        DASHBOARD_CONFIG.MAX_DATA_COLS
+      )
+      .forEach(
+        function(value) {
 
-        cells.push(
-          value
-        );
-      }
-    );
+          cells.push(
+            value
+          );
+        }
+      );
   }
 
 
   if (displayRow) {
 
-    displayRow.forEach(
-      function(value) {
+    displayRow
+      .slice(
+        0,
+        DASHBOARD_CONFIG.MAX_DATA_COLS
+      )
+      .forEach(
+        function(value) {
 
-        cells.push(
-          value
-        );
-      }
-    );
+          cells.push(
+            value
+          );
+        }
+      );
   }
 
 
@@ -1755,6 +1998,796 @@ function parseDateFromCell_(value) {
 
 
 /***************************************************************
+ * 돈사/돈방별 비정기 실사보정
+ *
+ * J열에 실사두수가 있는 상세행은 그 날짜의 확정 재고다.
+ * 보정 차이는 같은 돈사/돈방의 다음 실사일까지 승계한다.
+ * 원본 시트는 변경하지 않고 연동용 A:I 출력만 보정한다.
+ ***************************************************************/
+
+function applyInventoryAuditAdjustments_(
+  monthlyAnalyses
+) {
+
+  const analyses =
+    monthlyAnalyses ||
+    [];
+
+
+  const chronologicalBlocks = [];
+
+
+  analyses.forEach(
+    function(info) {
+
+      info.outputValues =
+        (info.scan.values || [])
+          .map(
+            function(row) {
+
+              return row.slice(
+                0,
+                DASHBOARD_CONFIG.MAX_DATA_COLS
+              );
+            }
+          );
+
+
+      (info.validBlocks || [])
+        .forEach(
+          function(block) {
+
+            chronologicalBlocks.push({
+              info:
+                info,
+              block:
+                block
+            });
+          }
+        );
+    }
+  );
+
+
+  chronologicalBlocks.sort(
+    function(a, b) {
+
+      const dateDiff =
+        a.block.date.getTime() -
+        b.block.date.getTime();
+
+
+      if (dateDiff !== 0) {
+        return dateDiff;
+      }
+
+
+      return (
+        a.info.monthIndex -
+        b.info.monthIndex
+      );
+    }
+  );
+
+
+  const entityStates =
+    new Map();
+
+
+  chronologicalBlocks.forEach(
+    function(item) {
+
+      applyInventoryAuditToBlock_(
+        item.info,
+        item.block,
+        entityStates
+      );
+    }
+  );
+
+
+  analyses.forEach(
+    function(info) {
+
+      const adjustedValues =
+        (info.scan.values || [])
+          .map(
+            function(sourceRow, index) {
+
+              const row =
+                sourceRow.slice();
+
+
+              const outputRow =
+                info.outputValues[index] ||
+                [];
+
+
+              for (
+                let col = 0;
+                col <
+                  DASHBOARD_CONFIG.MAX_DATA_COLS;
+                col++
+              ) {
+
+                row[col] =
+                  outputRow[col];
+              }
+
+
+              return row;
+            }
+          );
+
+
+      info.adjustedScan = {
+        lastRow:
+          info.scan.lastRow,
+
+        values:
+          adjustedValues,
+
+        displayValues:
+          info.scan.displayValues,
+
+        formulas:
+          info.scan.formulas
+      };
+    }
+  );
+}
+
+
+function applyInventoryAuditToBlock_(
+  info,
+  block,
+  entityStates
+) {
+
+  let currentSection =
+    "";
+
+
+  const occurrenceMap =
+    new Map();
+
+
+  const sectionPreviousDeltas =
+    new Map();
+
+
+  const sectionCurrentDeltas =
+    new Map();
+
+
+  const groupPreviousDeltas =
+    new Map();
+
+
+  const groupCurrentDeltas =
+    new Map();
+
+
+  let inAggregateSummary =
+    false;
+
+
+  let grandPreviousDelta =
+    0;
+
+
+  let grandCurrentDelta =
+    0;
+
+
+  block.appliedInventoryAudits =
+    [];
+
+
+  for (
+    let rowNum =
+      block.dateBlockStartRow;
+
+    rowNum <=
+      block.copyEndRow;
+
+    rowNum++
+  ) {
+
+    const valueRow =
+      info.scan.values[
+        rowNum - 1
+      ];
+
+
+    const displayRow =
+      info.scan.displayValues[
+        rowNum - 1
+      ];
+
+
+    const formulaRow =
+      info.scan.formulas[
+        rowNum - 1
+      ];
+
+
+    const outputRow =
+      info.outputValues[
+        rowNum - 1
+      ];
+
+
+    if (
+      !valueRow ||
+      !displayRow ||
+      !formulaRow ||
+      !outputRow
+    ) {
+
+      continue;
+    }
+
+
+    const section =
+      cellText_(
+        displayRow,
+        valueRow,
+        0
+      );
+
+
+    const sub =
+      cellText_(
+        displayRow,
+        valueRow,
+        2
+      );
+
+
+    if (
+      section &&
+      !isAnyTotalLabel_(
+        section
+      )
+    ) {
+
+      inAggregateSummary =
+        false;
+
+      currentSection =
+        section;
+    }
+
+
+    if (
+      isGrandTotalLabel_(section) ||
+      isGrandTotalLabel_(sub)
+    ) {
+
+      applyDeltaToOutputCell_(
+        outputRow,
+        displayRow,
+        valueRow,
+        3,
+        grandPreviousDelta
+      );
+
+
+      applyDeltaToOutputCell_(
+        outputRow,
+        displayRow,
+        valueRow,
+        8,
+        grandCurrentDelta
+      );
+
+
+      continue;
+    }
+
+
+    if (
+      isSubTotalLabel_(section) ||
+      isSubTotalLabel_(sub)
+    ) {
+
+      const sectionKey =
+        normalizeEntityText_(
+          currentSection
+        );
+
+
+      const groupKey =
+        classifyInventoryGroup_(
+          currentSection,
+          section,
+          sub
+        );
+
+
+      const previousDelta =
+        groupKey !== "other"
+          ? Number(
+              groupPreviousDeltas.get(
+                groupKey
+              ) || 0
+            )
+          : Number(
+              sectionPreviousDeltas.get(
+                sectionKey
+              ) || 0
+            );
+
+
+      const currentDelta =
+        groupKey !== "other"
+          ? Number(
+              groupCurrentDeltas.get(
+                groupKey
+              ) || 0
+            )
+          : Number(
+              sectionCurrentDeltas.get(
+                sectionKey
+              ) || 0
+            );
+
+
+      applyDeltaToOutputCell_(
+        outputRow,
+        displayRow,
+        valueRow,
+        3,
+        previousDelta
+      );
+
+
+      applyDeltaToOutputCell_(
+        outputRow,
+        displayRow,
+        valueRow,
+        8,
+        currentDelta
+      );
+
+
+      inAggregateSummary =
+        true;
+
+
+      continue;
+    }
+
+
+    if (
+      inAggregateSummary &&
+      !section &&
+      hasNumericCell_(
+        displayRow,
+        valueRow,
+        8
+      )
+    ) {
+
+      const groupKey =
+        classifyInventoryGroup_(
+          currentSection,
+          section,
+          sub
+        );
+
+
+      if (groupKey !== "other") {
+
+        applyDeltaToOutputCell_(
+          outputRow,
+          displayRow,
+          valueRow,
+          3,
+          Number(
+            groupPreviousDeltas.get(
+              groupKey
+            ) || 0
+          )
+        );
+
+
+        applyDeltaToOutputCell_(
+          outputRow,
+          displayRow,
+          valueRow,
+          8,
+          Number(
+            groupCurrentDeltas.get(
+              groupKey
+            ) || 0
+          )
+        );
+      }
+
+
+      continue;
+    }
+
+
+    if (
+      !hasNumericCell_(
+        displayRow,
+        valueRow,
+        8
+      )
+    ) {
+
+      continue;
+    }
+
+
+    const sectionKey =
+      normalizeEntityText_(
+        currentSection
+      );
+
+
+    const subKey =
+      normalizeEntityText_(
+        sub
+      );
+
+
+    if (
+      !sectionKey &&
+      !subKey
+    ) {
+
+      continue;
+    }
+
+
+    const baseKey =
+      sectionKey +
+      "|" +
+      subKey;
+
+
+    const occurrence =
+      Number(
+        occurrenceMap.get(
+          baseKey
+        ) || 0
+      ) +
+      1;
+
+
+    occurrenceMap.set(
+      baseKey,
+      occurrence
+    );
+
+
+    const entityKey =
+      baseKey +
+      "#" +
+      occurrence;
+
+
+    const groupKey =
+      classifyInventoryGroup_(
+        currentSection,
+        section,
+        sub
+      );
+
+
+    const state =
+      entityStates.get(
+        entityKey
+      ) ||
+      {
+        offset:
+          0
+      };
+
+
+    const rawPrevious =
+      cellNumber_(
+        displayRow,
+        valueRow,
+        3
+      );
+
+
+    const rawCurrent =
+      cellNumber_(
+        displayRow,
+        valueRow,
+        8
+      );
+
+
+    const previousOffset =
+      Number(
+        state.offset || 0
+      );
+
+
+    const adjustedPrevious =
+      rawPrevious +
+      previousOffset;
+
+
+    const audit =
+      manualInventoryAuditValue_(
+        displayRow,
+        valueRow,
+        formulaRow,
+        DASHBOARD_CONFIG
+          .INVENTORY_AUDIT_COL - 1
+      );
+
+
+    let adjustedCurrent =
+      rawCurrent +
+      previousOffset;
+
+
+    let currentOffset =
+      previousOffset;
+
+
+    if (audit.hasValue) {
+
+      adjustedCurrent =
+        audit.value;
+
+
+      currentOffset =
+        adjustedCurrent -
+        rawCurrent;
+
+
+      block.appliedInventoryAudits.push({
+        cell:
+          columnNumberToLetter_(
+            DASHBOARD_CONFIG
+              .INVENTORY_AUDIT_COL
+          ) +
+          rowNum,
+
+        entityKey:
+          entityKey,
+
+        previousCalculated:
+          rawCurrent +
+          previousOffset,
+
+        actual:
+          adjustedCurrent,
+
+        correction:
+          adjustedCurrent -
+          (
+            rawCurrent +
+            previousOffset
+          )
+      });
+    }
+
+
+    outputRow[3] =
+      adjustedPrevious;
+
+
+    outputRow[8] =
+      adjustedCurrent;
+
+
+    const previousDelta =
+      adjustedPrevious -
+      rawPrevious;
+
+
+    const currentDelta =
+      adjustedCurrent -
+      rawCurrent;
+
+
+    sectionPreviousDeltas.set(
+      sectionKey,
+      Number(
+        sectionPreviousDeltas.get(
+          sectionKey
+        ) || 0
+      ) +
+      previousDelta
+    );
+
+
+    sectionCurrentDeltas.set(
+      sectionKey,
+      Number(
+        sectionCurrentDeltas.get(
+          sectionKey
+        ) || 0
+      ) +
+      currentDelta
+    );
+
+
+    groupPreviousDeltas.set(
+      groupKey,
+      Number(
+        groupPreviousDeltas.get(
+          groupKey
+        ) || 0
+      ) +
+      previousDelta
+    );
+
+
+    groupCurrentDeltas.set(
+      groupKey,
+      Number(
+        groupCurrentDeltas.get(
+          groupKey
+        ) || 0
+      ) +
+      currentDelta
+    );
+
+
+    grandPreviousDelta +=
+      previousDelta;
+
+
+    grandCurrentDelta +=
+      currentDelta;
+
+
+    state.offset =
+      currentOffset;
+
+
+    entityStates.set(
+      entityKey,
+      state
+    );
+  }
+}
+
+
+function applyDeltaToOutputCell_(
+  outputRow,
+  displayRow,
+  valueRow,
+  zeroBasedCol,
+  delta
+) {
+
+  if (
+    !delta ||
+    !hasNumericCell_(
+      displayRow,
+      valueRow,
+      zeroBasedCol
+    )
+  ) {
+
+    return;
+  }
+
+
+  outputRow[
+    zeroBasedCol
+  ] =
+    cellNumber_(
+      displayRow,
+      valueRow,
+      zeroBasedCol
+    ) +
+    delta;
+}
+
+
+function normalizeEntityText_(value) {
+
+  return normalizeText_(
+    value
+  );
+}
+
+
+function classifyInventoryGroup_(
+  currentSection,
+  section,
+  sub
+) {
+
+  const text =
+    [
+      currentSection,
+      section,
+      sub
+    ]
+      .map(
+        normalizeEntityText_
+      )
+      .join(" ");
+
+
+  if (
+    text.indexOf(
+      "поросята-сосуны"
+    ) !== -1 ||
+    text.indexOf(
+      "поросята сосуны"
+    ) !== -1
+  ) {
+
+    return "suckling";
+  }
+
+
+  if (
+    text.indexOf(
+      "свиномат"
+    ) !== -1 ||
+    text.indexOf(
+      "свино маток"
+    ) !== -1 ||
+    text.indexOf(
+      "супорос"
+    ) !== -1 ||
+    text.indexOf(
+      "лактир"
+    ) !== -1 ||
+    text.indexOf(
+      "холост"
+    ) !== -1
+  ) {
+
+    return "sow";
+  }
+
+
+  if (
+    text.indexOf(
+      "отъем"
+    ) !== -1 ||
+    text.indexOf(
+      "отъём"
+    ) !== -1
+  ) {
+
+    return "weaned";
+  }
+
+
+  if (
+    text.indexOf(
+      "доращ"
+    ) !== -1
+  ) {
+
+    return "growing";
+  }
+
+
+  if (
+    text.indexOf(
+      "откорм"
+    ) !== -1
+  ) {
+
+    return "fattening";
+  }
+
+
+  return "other";
+}
+
+
+/***************************************************************
  * 연간 KPI 기록 수집
  ***************************************************************/
 
@@ -1784,7 +2817,10 @@ function collectAnnualDailyKpiRecords_(
 
             const record =
               extractDailyKpiFromBlock_(
-                info.scan,
+                (
+                  info.adjustedScan ||
+                  info.scan
+                ),
                 block,
                 info.sheetName
               );
@@ -3109,6 +4145,384 @@ function writeAnnualHeader_(sheet) {
 
 
 /***************************************************************
+ * 월작업일지 J열 실사두수 입력란 설정
+ *
+ * 기존 J열 값은 지우지 않는다.
+ * I열 서식을 J열로 복사하고 상세 재고행만 입력색을 적용한다.
+ ***************************************************************/
+
+function setupInventoryAuditInputColumn() {
+
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+
+  let configuredSheets =
+    0;
+
+
+  let configuredBlocks =
+    0;
+
+
+  DASHBOARD_CONFIG.MONTHS_RU
+    .forEach(
+      function(monthName, index) {
+
+        const sheetName =
+          monthName +
+          " " +
+          DASHBOARD_CONFIG.YEAR;
+
+
+        const sheet =
+          ss.getSheetByName(
+            sheetName
+          );
+
+
+        if (!sheet) {
+          return;
+        }
+
+
+        const info =
+          analyzeMonthlySheet_(
+            sheet,
+            sheetName,
+            index + 1
+          );
+
+
+        const inputCells =
+          [];
+
+
+        (info.allBlocks || [])
+          .forEach(
+            function(block) {
+
+              const rowCount =
+                block.copyEndRow -
+                block.dateBlockStartRow +
+                1;
+
+
+              if (rowCount < 1) {
+                return;
+              }
+
+
+              sheet
+                .getRange(
+                  block.dateBlockStartRow,
+                  9,
+                  rowCount,
+                  1
+                )
+                .copyFormatToRange(
+                  sheet,
+                  DASHBOARD_CONFIG
+                    .INVENTORY_AUDIT_COL,
+                  DASHBOARD_CONFIG
+                    .INVENTORY_AUDIT_COL,
+                  block.dateBlockStartRow,
+                  block.copyEndRow
+                );
+
+
+              const headerRow =
+                block.dateBlockStartRow +
+                1;
+
+
+              if (
+                headerRow <=
+                block.copyEndRow
+              ) {
+
+                sheet
+                  .getRange(
+                    headerRow,
+                    DASHBOARD_CONFIG
+                      .INVENTORY_AUDIT_COL
+                  )
+                  .setValue(
+                    DASHBOARD_CONFIG
+                      .INVENTORY_AUDIT_HEADER
+                  )
+                  .setNote(
+                    "실사한 경우에만 실제 개체수를 0 이상의 정수로 입력합니다. " +
+                    "빈칸은 실사 없음이며 숫자 0도 유효합니다."
+                  );
+              }
+
+
+              collectInventoryAuditCandidateCells_(
+                info.scan,
+                block
+              )
+                .forEach(
+                  function(cell) {
+                    inputCells.push(
+                      cell
+                    );
+                  }
+                );
+
+
+              configuredBlocks +=
+                1;
+            }
+          );
+
+
+        if (inputCells.length) {
+
+          sheet
+            .getRangeList(
+              inputCells
+            )
+            .setBackground(
+              "#fff2cc"
+            )
+            .setNumberFormat(
+              "0"
+            );
+        }
+
+
+        configuredSheets +=
+          1;
+      }
+    );
+
+
+  Logger.log(
+    [
+      "=== 실사두수 J열 입력란 설정 완료 ===",
+      "대상 월시트: " +
+        configuredSheets,
+      "설정 날짜블록: " +
+        configuredBlocks,
+      "입력 방법: 해당 날짜의 돈사/돈방 행 J열에 실제 두수 입력",
+      "주의: ИТОГО / ВСЕГО 합계행에는 입력하지 않음"
+    ].join("\n")
+  );
+}
+
+
+function collectInventoryAuditCandidateCells_(
+  scan,
+  block
+) {
+
+  const cells = [];
+
+
+  let inAggregateSummary =
+    false;
+
+
+  for (
+    let rowNum =
+      block.dateBlockStartRow;
+
+    rowNum <=
+      block.copyEndRow;
+
+    rowNum++
+  ) {
+
+    const valueRow =
+      scan.values[
+        rowNum - 1
+      ];
+
+
+    const displayRow =
+      scan.displayValues[
+        rowNum - 1
+      ];
+
+
+    if (
+      !valueRow ||
+      !displayRow
+    ) {
+
+      continue;
+    }
+
+
+    const section =
+      cellText_(
+        displayRow,
+        valueRow,
+        0
+      );
+
+
+    const sub =
+      cellText_(
+        displayRow,
+        valueRow,
+        2
+      );
+
+
+    if (
+      isSubTotalLabel_(section) ||
+      isSubTotalLabel_(sub)
+    ) {
+
+      inAggregateSummary =
+        true;
+
+      continue;
+    }
+
+
+    if (
+      isGrandTotalLabel_(section) ||
+      isGrandTotalLabel_(sub)
+    ) {
+
+      continue;
+    }
+
+
+    if (
+      section &&
+      !isAnyTotalLabel_(
+        section
+      )
+    ) {
+
+      inAggregateSummary =
+        false;
+    }
+
+
+    if (
+      inAggregateSummary &&
+      !section
+    ) {
+
+      continue;
+    }
+
+
+    if (
+      !hasNumericCell_(
+        displayRow,
+        valueRow,
+        8
+      )
+    ) {
+
+      continue;
+    }
+
+
+    cells.push(
+      columnNumberToLetter_(
+        DASHBOARD_CONFIG
+          .INVENTORY_AUDIT_COL
+      ) +
+      rowNum
+    );
+  }
+
+
+  return cells;
+}
+
+
+/***************************************************************
+ * 실사보정 진단
+ ***************************************************************/
+
+function showInventoryAuditSummary() {
+
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(
+      ss
+    );
+
+
+  const lines = [
+    "=== 돈사/돈방별 실사보정 점검 ==="
+  ];
+
+
+  let count =
+    0;
+
+
+  monthlyAnalyses.forEach(
+    function(info) {
+
+      (info.validBlocks || [])
+        .forEach(
+          function(block) {
+
+            (block.appliedInventoryAudits || [])
+              .forEach(
+                function(audit) {
+
+                  count +=
+                    1;
+
+
+                  lines.push(
+                    [
+                      info.sheetName,
+                      formatDateForDisplay_(
+                        block.date
+                      ),
+                      audit.cell,
+                      audit.entityKey,
+                      "보정 전=" +
+                        audit.previousCalculated,
+                      "실사=" +
+                        audit.actual,
+                      "차이=" +
+                        audit.correction
+                    ].join(" | ")
+                  );
+                }
+              );
+          }
+        );
+    }
+  );
+
+
+  if (count === 0) {
+    lines.push(
+      "입력된 실사두수가 없습니다."
+    );
+  }
+
+
+  lines.push(
+    "총 실사입력: " +
+      count
+  );
+
+
+  Logger.log(
+    lines.join("\n")
+  );
+}
+
+
+/***************************************************************
  * 유효 작업일 진단
  ***************************************************************/
 
@@ -3661,6 +5075,199 @@ function cellNumber_(
 
 
 /***************************************************************
+ * 숫자 셀 존재 여부
+ *
+ * 빈 셀과 숫자 0을 구분한다.
+ ***************************************************************/
+
+function hasNumericCell_(
+  displayRow,
+  valueRow,
+  zeroBasedCol
+) {
+
+  let value =
+    valueRow &&
+    valueRow[
+      zeroBasedCol
+    ] !== undefined &&
+    valueRow[
+      zeroBasedCol
+    ] !== null &&
+    valueRow[
+      zeroBasedCol
+    ] !== ""
+      ? valueRow[
+          zeroBasedCol
+        ]
+      : (
+          displayRow
+            ? displayRow[
+                zeroBasedCol
+              ]
+            : ""
+        );
+
+
+  if (
+    typeof value ===
+    "number"
+  ) {
+
+    return Number.isFinite(
+      value
+    );
+  }
+
+
+  const text =
+    String(
+      value == null
+        ? ""
+        : value
+    )
+      .replace(
+        /\u00A0/g,
+        ""
+      )
+      .replace(
+        /\s/g,
+        ""
+      )
+      .replace(
+        /,/g,
+        "."
+      )
+      .trim();
+
+
+  return (
+    text !== "" &&
+    /^-?\d+(\.\d+)?$/
+      .test(
+        text
+      ) &&
+    Number.isFinite(
+      Number(
+        text
+      )
+    )
+  );
+}
+
+
+/***************************************************************
+ * 수식이 아닌 직접입력 숫자 읽기
+ ***************************************************************/
+
+function manualNumericValue_(
+  displayRow,
+  valueRow,
+  formulaRow,
+  zeroBasedCol
+) {
+
+  const formula =
+    formulaRow &&
+    formulaRow[
+      zeroBasedCol
+    ] !== undefined &&
+    formulaRow[
+      zeroBasedCol
+    ] !== null
+      ? String(
+          formulaRow[
+            zeroBasedCol
+          ]
+        ).trim()
+      : "";
+
+
+  if (formula !== "") {
+
+    return {
+      hasValue:
+        false,
+      value:
+        null
+    };
+  }
+
+
+  if (
+    !hasNumericCell_(
+      displayRow,
+      valueRow,
+      zeroBasedCol
+    )
+  ) {
+
+    return {
+      hasValue:
+        false,
+      value:
+        null
+    };
+  }
+
+
+  return {
+    hasValue:
+      true,
+    value:
+      cellNumber_(
+        displayRow,
+        valueRow,
+        zeroBasedCol
+      )
+  };
+}
+
+
+/***************************************************************
+ * 실사두수 직접입력 읽기
+ *
+ * 개체수이므로 0 이상의 정수만 유효하다.
+ ***************************************************************/
+
+function manualInventoryAuditValue_(
+  displayRow,
+  valueRow,
+  formulaRow,
+  zeroBasedCol
+) {
+
+  const result =
+    manualNumericValue_(
+      displayRow,
+      valueRow,
+      formulaRow,
+      zeroBasedCol
+    );
+
+
+  if (
+    !result.hasValue ||
+    result.value < 0 ||
+    !Number.isInteger(
+      result.value
+    )
+  ) {
+
+    return {
+      hasValue:
+        false,
+      value:
+        null
+    };
+  }
+
+
+  return result;
+}
+
+
+/***************************************************************
  * 날짜 도우미
  ***************************************************************/
 
@@ -3802,7 +5409,7 @@ function columnNumberToLetter_(column) {
 
 
 /***************************************************************
- * 분석 시 읽은 원본 A:I에서 출력값 구성
+ * 분석 시 읽은 원본 A:J에서 연동용 A:I 출력값 구성
  ***************************************************************/
 
 function getMonthlyOutputValues_(analysis) {
@@ -3829,10 +5436,27 @@ function getMonthlyOutputValues_(analysis) {
     );
 
 
-  return analysis.scan.values.slice(
-    0,
-    safeEndRow
-  );
+  const source =
+    analysis.outputValues &&
+    analysis.outputValues.length
+      ? analysis.outputValues
+      : analysis.scan.values;
+
+
+  return source
+    .slice(
+      0,
+      safeEndRow
+    )
+    .map(
+      function(row) {
+
+        return row.slice(
+          0,
+          DASHBOARD_CONFIG.MAX_DATA_COLS
+        );
+      }
+    );
 }
 
 

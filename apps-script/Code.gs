@@ -1,6 +1,7 @@
 /***************************************************************
  * 양돈장 대시보드 자동연동
- * Code.gs v11.3-RC1 (실사보정 + 신규 월 작업일지 자동생성)
+ * Code.gs v11.4-RC1
+ * (상세 실사보정 + 구분 합계 실사보정 + 신규 월 작업일지 자동생성)
  *
  * =============================================================
  * [행 간격 제거 리팩터링]
@@ -74,6 +75,13 @@
  *   - 전월 실사보정 후 최종재고를 새 월 1일 전일재고(D열)로 이월
  *   - 판매·폐사·분만 원인은 생성하거나 추정하지 않음
  *   - 기존 대시보드 자동갱신 트리거 및 HTML은 변경하지 않음
+ *
+ * [v11.4-RC1 구분 합계 실사보정]
+ *   - 러시아어 입력시트 "Инвентаризация поголовья" 추가
+ *   - 월별 구분 합계 실사값을 대시보드 출력과 KPI에만 보정
+ *   - 상세 돈사/돈방 행에는 차이를 임의 배분하지 않음
+ *   - 실제 실사일 우선, 미확인 자료는 월말 적용
+ *   - 미분류 후보돈·도태모돈·웅돈 또는 J열 실사 충돌 시 미적용
  *
  * 보류/유지:
  *   - onEdit/onChange 트리거 구성은 별도 검증 단계에서 정리
@@ -234,6 +242,55 @@ const MONTHLY_SHEET_CREATION_CONFIG = {
 };
 
 
+/*
+ * 러시아 현지 운영자용 구분 합계 실사 입력시트.
+ * K:M의 후보돈·도태모돈·웅돈은 분류 지시가 없으면 적용하지 않는다.
+ */
+const GROUP_INVENTORY_AUDIT_CONFIG = {
+  SHEET_NAME: "Инвентаризация поголовья",
+  HEADER_ROW: 1,
+  FIRST_DATA_ROW: 2,
+  MANAGED_ROWS: 200,
+  COLUMN_COUNT: 16,
+  COL: {
+    AUDIT_DATE: 1,
+    REPORTING_MONTH: 2,
+    SOW_MAIN: 3,
+    SOW_FARROWING: 4,
+    SOW_TOTAL: 5,
+    SUCKLING: 6,
+    WEANED: 7,
+    GROWING: 8,
+    FATTENING_OLD: 9,
+    FATTENING_NEW: 10,
+    REPLACEMENT_GILTS: 11,
+    CULLED_SOWS: 12,
+    BOARS: 13,
+    AUDIT_TOTAL: 14,
+    STATUS: 15,
+    NOTE: 16
+  },
+  STATUS: {
+    APPLIED: "Применено",
+    NEEDS_CLARIFICATION: "Требуется уточнение",
+    DATA_ERROR: "Ошибка данных",
+    NOT_APPLIED: "Не применяется"
+  },
+  GROUP_KEYS: [
+    "sow", "suckling", "weaned", "growing", "fattening_old", "fattening_new"
+  ],
+  /* 첨부된 поголовье 2026.xlsx. 정확한 일자가 없어 월말로 입력한다. */
+  INITIAL_DATA: [
+    { month: 1, sowMain: 312, sowFarrowing: 30, suckling: 283, weaned: 980, growing: 489, fatteningOld: 1329, fatteningNew: 1095 },
+    { month: 2, sowMain: 317, sowFarrowing: 37, suckling: 357, weaned: 800, growing: 532, fatteningOld: 1477, fatteningNew: 1170 },
+    { month: 3, sowMain: 302, sowFarrowing: 44, suckling: 407, weaned: 758, growing: 602, fatteningOld: 1568, fatteningNew: 1187 },
+    { month: 4, sowMain: 326, sowFarrowing: 31, suckling: 484, weaned: 723, growing: 631, fatteningOld: 1631, fatteningNew: 1232 },
+    { month: 5, sowMain: 313, sowFarrowing: 59, suckling: 375, weaned: 855, growing: 613, fatteningOld: 1689, fatteningNew: 1350 },
+    { month: 6, sowMain: 321, sowFarrowing: 58, suckling: 422, weaned: 1137, growing: 580, fatteningOld: 1535, fatteningNew: 1357 }
+  ]
+};
+
+
 /***************************************************************
  * 메뉴
  ***************************************************************/
@@ -286,6 +343,11 @@ function onOpen() {
     .addItem(
       "실사두수 J열 입력란 설정",
       "setupInventoryAuditInputColumn"
+    )
+
+    .addItem(
+      "러시아어 구분 실사입력 시트 설정",
+      "setupGroupInventoryAuditSheet"
     )
 
     .addSeparator()
@@ -775,9 +837,13 @@ function collectMonthlyAnalyses_(ss) {
     );
 
 
-  applyInventoryAuditAdjustments_(
-    analyses
-  );
+  const groupAuditContext = readGroupInventoryAuditRecords_(ss);
+
+  matchGroupInventoryAuditsToBlocks_(analyses, groupAuditContext.records);
+  applyInventoryAuditAdjustments_(analyses);
+  applyGroupInventoryAuditAdjustments_(analyses, groupAuditContext.records);
+  writeGroupInventoryAuditStatuses_(groupAuditContext);
+  analyses.groupInventoryAuditContext = groupAuditContext;
 
 
   return analyses;
@@ -1171,7 +1237,13 @@ function createEmptyMonthlyAnalysis_(
     inventoryAuditCount:
       0,
 
+    groupInventoryAuditCount:
+      0,
+
     outputValues:
+      [],
+
+    reportingOutputValues:
       []
   };
 }
@@ -2614,6 +2686,13 @@ function applyInventoryAuditToBlock_(
         entityKey:
           entityKey,
 
+        groupAuditKey:
+          classifyGroupInventoryTargetKey_(
+            currentSection,
+            section,
+            sub
+          ),
+
         previousCalculated:
           rawCurrent +
           previousOffset,
@@ -2845,6 +2924,436 @@ function classifyInventoryGroup_(
 
 
 /***************************************************************
+ * 구분 합계 실사 입력 읽기/검증
+ ***************************************************************/
+
+function readGroupInventoryAuditRecords_(ss) {
+
+  const sheet = ss.getSheetByName(GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME);
+  const firstDataRow = GROUP_INVENTORY_AUDIT_CONFIG.FIRST_DATA_ROW;
+
+  if (!sheet) {
+    return { sheet: null, firstDataRow: firstDataRow, rowCount: 0, records: [] };
+  }
+
+  const rowCount = Math.max(0, sheet.getLastRow() - firstDataRow + 1);
+  if (!rowCount) {
+    return { sheet: sheet, firstDataRow: firstDataRow, rowCount: 0, records: [] };
+  }
+
+  const inputRange = sheet.getRange(
+    firstDataRow,
+    1,
+    rowCount,
+    GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT
+  );
+  const rows = inputRange.getValues();
+  const formulas = inputRange.getFormulas();
+  const records = [];
+
+  rows.forEach(function(row, index) {
+    if (!groupAuditRowHasData_(row)) return;
+
+    const formulaRow = formulas[index] || [];
+    const record = {
+      rowNum: firstDataRow + index,
+      sourceRow: row,
+      date: null,
+      dateKey: "",
+      groupValues: null,
+      expectedTotal: null,
+      status: "",
+      canApply: true,
+      matchedInfo: null,
+      matchedBlock: null,
+      applied: false
+    };
+    if (formulaRow[GROUP_INVENTORY_AUDIT_CONFIG.COL.AUDIT_DATE - 1]) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "дата инвентаризации не должна быть формулой");
+      records.push(record);
+      return;
+    }
+    const parsedDate = parseDateFromCell_(row[GROUP_INVENTORY_AUDIT_CONFIG.COL.AUDIT_DATE - 1]);
+    if (!parsedDate) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "не указана корректная дата инвентаризации");
+      records.push(record);
+      return;
+    }
+    record.date = new Date(parsedDate.getFullYear(), parsedDate.getMonth(), parsedDate.getDate());
+    record.dateKey = dateKey_(record.date);
+
+    const c = GROUP_INVENTORY_AUDIT_CONFIG.COL;
+    const fields = {
+      sowMain: readGroupAuditInteger_(row[c.SOW_MAIN - 1], formulaRow[c.SOW_MAIN - 1]),
+      sowFarrowing: readGroupAuditInteger_(row[c.SOW_FARROWING - 1], formulaRow[c.SOW_FARROWING - 1]),
+      suckling: readGroupAuditInteger_(row[c.SUCKLING - 1], formulaRow[c.SUCKLING - 1]),
+      weaned: readGroupAuditInteger_(row[c.WEANED - 1], formulaRow[c.WEANED - 1]),
+      growing: readGroupAuditInteger_(row[c.GROWING - 1], formulaRow[c.GROWING - 1]),
+      fatteningOld: readGroupAuditInteger_(row[c.FATTENING_OLD - 1], formulaRow[c.FATTENING_OLD - 1]),
+      fatteningNew: readGroupAuditInteger_(row[c.FATTENING_NEW - 1], formulaRow[c.FATTENING_NEW - 1]),
+      replacementGilts: readGroupAuditInteger_(row[c.REPLACEMENT_GILTS - 1], formulaRow[c.REPLACEMENT_GILTS - 1]),
+      culledSows: readGroupAuditInteger_(row[c.CULLED_SOWS - 1], formulaRow[c.CULLED_SOWS - 1]),
+      boars: readGroupAuditInteger_(row[c.BOARS - 1], formulaRow[c.BOARS - 1])
+    };
+
+    if (Object.keys(fields).some(function(key) { return !fields[key].valid; })) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "количество должно быть целым числом 0 или больше");
+      records.push(record);
+      return;
+    }
+
+    const required = ["sowMain", "sowFarrowing", "suckling", "weaned", "growing", "fatteningOld", "fatteningNew"];
+    if (required.some(function(key) { return !fields[key].present; })) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "не заполнены все обязательные категории");
+      records.push(record);
+      return;
+    }
+
+    if ([fields.replacementGilts, fields.culledSows, fields.boars].some(function(item) {
+      return item.present && item.value > 0;
+    })) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NEEDS_CLARIFICATION, "требуется указать, куда включить ремонтных свинок, выбракованных свиноматок или хряков");
+      records.push(record);
+      return;
+    }
+
+    const sowTotal = fields.sowMain.value + fields.sowFarrowing.value;
+    const groupValues = {
+      sow: sowTotal,
+      suckling: fields.suckling.value,
+      weaned: fields.weaned.value,
+      growing: fields.growing.value,
+      fattening_old: fields.fatteningOld.value,
+      fattening_new: fields.fatteningNew.value
+    };
+    const expectedTotal = GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.reduce(function(sum, key) {
+      return sum + Number(groupValues[key] || 0);
+    }, 0);
+    const displayedSowTotal = readGroupAuditInteger_(row[c.SOW_TOTAL - 1]);
+    const displayedTotal = readGroupAuditInteger_(row[c.AUDIT_TOTAL - 1]);
+    if (displayedSowTotal.present && (!displayedSowTotal.valid || displayedSowTotal.value !== sowTotal)) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "итог по свиноматкам не совпадает с двумя исходными графами");
+      records.push(record);
+      return;
+    }
+    if (displayedTotal.present && (!displayedTotal.valid || displayedTotal.value !== expectedTotal)) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "общий итог не совпадает с суммой категорий");
+      records.push(record);
+      return;
+    }
+    record.groupValues = groupValues;
+    record.expectedTotal = expectedTotal;
+    records.push(record);
+  });
+
+  const recordsByDate = new Map();
+  records.filter(function(record) { return record.canApply && record.dateKey; }).forEach(function(record) {
+    const sameDate = recordsByDate.get(record.dateKey) || [];
+    sameDate.push(record);
+    recordsByDate.set(record.dateKey, sameDate);
+  });
+  recordsByDate.forEach(function(sameDate) {
+    if (sameDate.length < 2) return;
+    sameDate.forEach(function(record) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "дублируется дата инвентаризации");
+    });
+  });
+
+  return { sheet: sheet, firstDataRow: firstDataRow, rowCount: rowCount, records: records };
+}
+
+
+function groupAuditRowHasData_(row) {
+  const c = GROUP_INVENTORY_AUDIT_CONFIG.COL;
+  return [c.AUDIT_DATE, c.SOW_MAIN, c.SOW_FARROWING, c.SUCKLING, c.WEANED,
+    c.GROWING, c.FATTENING_OLD, c.FATTENING_NEW, c.REPLACEMENT_GILTS,
+    c.CULLED_SOWS, c.BOARS, c.NOTE].some(function(oneBasedCol) {
+      const value = row[oneBasedCol - 1];
+      return !(value === "" || value === null || value === undefined);
+    });
+}
+
+
+function readGroupAuditInteger_(value, formula) {
+  if (formula) {
+    return { present: true, valid: false, value: null };
+  }
+  if (value === "" || value === null || value === undefined) {
+    return { present: false, valid: true, value: null };
+  }
+  const normalized = typeof value === "number" ? value : Number(String(value)
+    .replace(/\u00A0/g, "").replace(/\s/g, "").replace(/,/g, "."));
+  const valid = Number.isFinite(normalized) && normalized >= 0 && Number.isInteger(normalized);
+  return { present: true, valid: valid, value: valid ? normalized : null };
+}
+
+
+function setGroupAuditRecordStatus_(record, status, detail) {
+  record.canApply = status === GROUP_INVENTORY_AUDIT_CONFIG.STATUS.APPLIED;
+  record.status = detail ? status + ": " + detail : status;
+}
+
+
+/***************************************************************
+ * 구분 합계 실사일과 월작업일지 블록 연결
+ ***************************************************************/
+
+function matchGroupInventoryAuditsToBlocks_(analyses, records) {
+  (records || []).forEach(function(record) {
+    if (!record.canApply || !record.date) return;
+    if (record.date.getFullYear() !== DASHBOARD_CONFIG.YEAR) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NOT_APPLIED, "год не соответствует текущему году панели");
+      return;
+    }
+    const info = (analyses || []).filter(function(item) {
+      return item && item.monthIndex === record.date.getMonth() + 1;
+    })[0] || null;
+    if (!info) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NOT_APPLIED, "нет листа месячного журнала");
+      return;
+    }
+    const block = (info.allBlocks || []).filter(function(item) {
+      return item && item.date && dateKey_(item.date) === record.dateKey;
+    })[0] || null;
+    if (!block) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "в месячном журнале нет блока указанной даты");
+      return;
+    }
+    record.matchedInfo = info;
+    record.matchedBlock = block;
+    block.groupInventoryAuditRecord = record;
+  });
+}
+
+
+/***************************************************************
+ * 구분 합계 실사보정
+ * 상세행에는 차이를 배분하지 않고 대표행과 ВСЕГО만 보정한다.
+ ***************************************************************/
+
+function applyGroupInventoryAuditAdjustments_(analyses, records) {
+  const chronologicalBlocks = [];
+
+  (analyses || []).forEach(function(info) {
+    const baseValues = info.outputValues && info.outputValues.length
+      ? info.outputValues
+      : (info.scan.values || []).map(function(row) { return row.slice(0, DASHBOARD_CONFIG.MAX_DATA_COLS); });
+    info.reportingOutputValues = baseValues.map(function(row) { return row.slice(); });
+    info.groupInventoryAuditCount = 0;
+    (info.allBlocks || []).forEach(function(block) {
+      block.appliedGroupInventoryAudits = [];
+      chronologicalBlocks.push({ info: info, block: block });
+    });
+  });
+
+  chronologicalBlocks.sort(function(a, b) {
+    const dateDiff = a.block.date.getTime() - b.block.date.getTime();
+    return dateDiff || (a.info.monthIndex - b.info.monthIndex);
+  });
+
+  const offsets = new Map();
+  GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.forEach(function(key) { offsets.set(key, 0); });
+  let overlayStarted = false;
+
+  chronologicalBlocks.forEach(function(item) {
+    const info = item.info;
+    const block = item.block;
+    const targets = findGroupInventoryTargetRows_(info.scan, block);
+    const record = block.groupInventoryAuditRecord || null;
+    let applyRecord = Boolean(record && record.canApply && record.groupValues);
+
+    if (applyRecord) {
+      const missing = GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.filter(function(key) { return !targets.groups[key]; });
+      if (missing.length || !targets.grandTotalRow) {
+        const detail = targets.ambiguousKeys && targets.ambiguousKeys.length
+          ? "несколько строк одной категории: " + targets.ambiguousKeys.join(", ")
+          : "не найдены все строки категорий или строка ВСЕГО";
+        setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, detail);
+        applyRecord = false;
+      }
+    }
+    if (applyRecord) {
+      const detailedKeys = new Set((block.appliedInventoryAudits || []).map(function(audit) {
+        return audit.groupAuditKey;
+      }).filter(function(key) { return Boolean(key); }));
+      if (GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.some(function(key) { return detailedKeys.has(key); })) {
+        setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR, "на эту дату уже введена детальная инвентаризация в столбце J");
+        applyRecord = false;
+      }
+    }
+    if (applyRecord) {
+      overlayStarted = true;
+      activateGroupAuditBlock_(info, block);
+    }
+    if (!overlayStarted) return;
+
+    let adjustedPreviousTotal = 0;
+    let adjustedCurrentTotal = 0;
+    let hasAllTargets = true;
+    GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.forEach(function(key) {
+      const rowNum = targets.groups[key];
+      if (!rowNum) { hasAllTargets = false; return; }
+      const rowIndex = rowNum - 1;
+      const baseRow = info.outputValues[rowIndex];
+      const displayRow = info.scan.displayValues[rowIndex];
+      const reportingRow = info.reportingOutputValues[rowIndex];
+      if (!baseRow || !reportingRow) { hasAllTargets = false; return; }
+      const basePrevious = cellNumber_(displayRow, baseRow, 3);
+      const baseCurrent = cellNumber_(displayRow, baseRow, 8);
+      const previousOffset = Number(offsets.get(key) || 0);
+      const adjustedPrevious = basePrevious + previousOffset;
+      let adjustedCurrent = baseCurrent + previousOffset;
+      let currentOffset = previousOffset;
+      if (applyRecord) {
+        adjustedCurrent = Number(record.groupValues[key]);
+        currentOffset = adjustedCurrent - baseCurrent;
+        block.appliedGroupInventoryAudits.push({
+          groupKey: key,
+          rowNum: rowNum,
+          previousCalculated: baseCurrent + previousOffset,
+          actual: adjustedCurrent,
+          correction: adjustedCurrent - (baseCurrent + previousOffset),
+          carriedOffset: currentOffset
+        });
+      }
+      reportingRow[3] = adjustedPrevious;
+      reportingRow[8] = adjustedCurrent;
+      adjustedPreviousTotal += adjustedPrevious;
+      adjustedCurrentTotal += adjustedCurrent;
+      offsets.set(key, currentOffset);
+    });
+    if (hasAllTargets && targets.grandTotalRow) {
+      const grandRow = info.reportingOutputValues[targets.grandTotalRow - 1];
+      if (grandRow) {
+        grandRow[3] = adjustedPreviousTotal;
+        grandRow[8] = adjustedCurrentTotal;
+      }
+    }
+    if (applyRecord) {
+      record.applied = true;
+      info.groupInventoryAuditCount += 1;
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.APPLIED, formatDateForDisplay_(record.date));
+    }
+  });
+
+  (analyses || []).forEach(function(info) {
+    const values = (info.scan.values || []).map(function(sourceRow, index) {
+      const row = sourceRow.slice();
+      const outputRow = info.reportingOutputValues[index] || [];
+      for (let col = 0; col < DASHBOARD_CONFIG.MAX_DATA_COLS; col++) row[col] = outputRow[col];
+      return row;
+    });
+    info.reportingScan = {
+      lastRow: info.scan.lastRow,
+      values: values,
+      displayValues: info.scan.displayValues,
+      formulas: info.scan.formulas
+    };
+  });
+
+  (records || []).forEach(function(record) {
+    if (record.canApply && record.matchedBlock && !record.applied && !record.status) {
+      setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NOT_APPLIED, "запись не была обработана");
+    }
+  });
+}
+
+
+function activateGroupAuditBlock_(info, block) {
+  if (!(info.validBlocks || []).some(function(item) { return item === block; })) info.validBlocks.push(block);
+  block.hasValidInput = true;
+  info.validBlocks.sort(function(a, b) { return a.date.getTime() - b.date.getTime(); });
+  info.hasValidInput = info.validBlocks.length > 0;
+  info.validCount = info.validBlocks.length;
+  const latest = info.validBlocks[info.validBlocks.length - 1];
+  if (!latest) return;
+  info.dateBlockStartRow = latest.dateBlockStartRow;
+  info.nextDateRow = latest.nextDateRow;
+  info.copyEndRow = latest.copyEndRow;
+  info.latestDate = latest.date;
+  info.matchedAnchorCount = latest.matchedAnchorCount;
+  info.inputAnchorCount = latest.inputAnchorCount;
+  info.missingAnchors = latest.missingAnchors;
+}
+
+
+function findGroupInventoryTargetRows_(scan, block) {
+  const candidates = {};
+  GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.forEach(function(key) { candidates[key] = []; });
+  const grandTotalCandidates = [];
+  let currentSection = "";
+  let inAggregateSummary = false;
+
+  for (let rowNum = block.dateBlockStartRow; rowNum <= block.copyEndRow; rowNum++) {
+    const valueRow = scan.values[rowNum - 1];
+    const displayRow = scan.displayValues[rowNum - 1];
+    if (!valueRow || !displayRow) continue;
+    const section = cellText_(displayRow, valueRow, 0);
+    const sub = cellText_(displayRow, valueRow, 2);
+    if (section && !isAnyTotalLabel_(section)) {
+      currentSection = section;
+      inAggregateSummary = false;
+    }
+    if (isGrandTotalLabel_(section) || isGrandTotalLabel_(sub)) {
+      grandTotalCandidates.push(rowNum);
+      continue;
+    }
+    if (isSubTotalLabel_(section) || isSubTotalLabel_(sub)) {
+      if (classifyGroupInventoryTargetKey_(currentSection, section, sub) === "sow") candidates.sow.push(rowNum);
+      inAggregateSummary = true;
+      continue;
+    }
+    if (inAggregateSummary && !section) {
+      if (classifyGroupInventoryTargetKey_(currentSection, section, sub) === "suckling") candidates.suckling.push(rowNum);
+      continue;
+    }
+    const key = classifyGroupInventoryTargetKey_(currentSection, section, sub);
+    if (["weaned", "growing", "fattening_old", "fattening_new"].indexOf(key) !== -1 && Boolean(section) && hasNumericCell_(displayRow, valueRow, 8)) {
+      candidates[key].push(rowNum);
+    }
+  }
+
+  const groups = {};
+  GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.forEach(function(key) {
+    if (candidates[key].length === 1) groups[key] = candidates[key][0];
+  });
+  return {
+    groups: groups,
+    grandTotalRow: grandTotalCandidates.length === 1 ? grandTotalCandidates[0] : null,
+    ambiguousKeys: GROUP_INVENTORY_AUDIT_CONFIG.GROUP_KEYS.filter(function(key) { return candidates[key].length > 1; }),
+    grandTotalCandidateCount: grandTotalCandidates.length
+  };
+}
+
+
+function classifyGroupInventoryTargetKey_(currentSection, section, sub) {
+  const sectionText = normalizeEntityText_(section || currentSection);
+  const subText = normalizeEntityText_(sub);
+  const text = sectionText + " " + subText;
+  if (text.indexOf("поросята-сосуны") !== -1 || text.indexOf("поросята сосуны") !== -1) return "suckling";
+  if (sectionText.indexOf("отъем поросята") !== -1 || sectionText.indexOf("отъём поросята") !== -1) return "weaned";
+  if (sectionText.indexOf("доращ") !== -1) return "growing";
+  if (sectionText.indexOf("откорм ст") !== -1 || sectionText.indexOf("откорм стар") !== -1) return "fattening_old";
+  if (sectionText.indexOf("откорм нов") !== -1) return "fattening_new";
+  if (text.indexOf("свиномат") !== -1 || text.indexOf("свино маток") !== -1 || text.indexOf("супорос") !== -1 || text.indexOf("лактир") !== -1) return "sow";
+  return "";
+}
+
+
+function writeGroupInventoryAuditStatuses_(context) {
+  if (!context || !context.sheet || !context.rowCount) return;
+  const statuses = Array.from({ length: context.rowCount }, function() { return [""]; });
+  (context.records || []).forEach(function(record) {
+    const index = record.rowNum - context.firstDataRow;
+    if (index >= 0 && index < statuses.length) {
+      statuses[index][0] = record.status || GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NOT_APPLIED;
+    }
+  });
+  context.sheet.getRange(context.firstDataRow, GROUP_INVENTORY_AUDIT_CONFIG.COL.STATUS, context.rowCount, 1).setValues(statuses);
+}
+
+
+/***************************************************************
  * 연간 KPI 기록 수집
  ***************************************************************/
 
@@ -2875,6 +3384,7 @@ function collectAnnualDailyKpiRecords_(
             const record =
               extractDailyKpiFromBlock_(
                 (
+                  info.reportingScan ||
                   info.adjustedScan ||
                   info.scan
                 ),
@@ -4202,6 +4712,146 @@ function writeAnnualHeader_(sheet) {
 
 
 /***************************************************************
+ * 러시아어 구분 합계 실사 입력시트 설정
+ ***************************************************************/
+
+function setupGroupInventoryAuditSheet() {
+  const ss = SpreadsheetApp.getActiveSpreadsheet();
+  const result = ensureGroupInventoryAuditSheet_(ss, true);
+  SpreadsheetApp.flush();
+  refreshDashboardLinks();
+  result.sheet.activate();
+  Logger.log([
+    "=== 구분 합계 실사 입력시트 설정 완료 ===",
+    "시트: " + GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME,
+    "초기자료 등록: " + (result.seeded ? "1~6월 등록" : "기존 자료 유지"),
+    "실사일 미확인 초기자료: 각 월 말일 적용",
+    "5~6월: 현재 월작업일지에 적용",
+    "1~4월: 월작업일지 부재로 보존만 함"
+  ].join("\n"));
+}
+
+
+function ensureGroupInventoryAuditSheet_(ss, seedInitialData) {
+  let sheet = ss.getSheetByName(GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME);
+  if (!sheet) sheet = ss.insertSheet(GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME);
+  ensureRows_(sheet, GROUP_INVENTORY_AUDIT_CONFIG.MANAGED_ROWS);
+  ensureColumns_(sheet, GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT);
+  configureGroupInventoryAuditSheet_(sheet);
+  return {
+    sheet: sheet,
+    seeded: seedInitialData ? seedInitialGroupInventoryAuditData_(sheet) : false
+  };
+}
+
+
+function configureGroupInventoryAuditSheet_(sheet) {
+  const c = GROUP_INVENTORY_AUDIT_CONFIG.COL;
+  const firstDataRow = GROUP_INVENTORY_AUDIT_CONFIG.FIRST_DATA_ROW;
+  const dataRowCount = GROUP_INVENTORY_AUDIT_CONFIG.MANAGED_ROWS - firstDataRow + 1;
+  const headers = [[
+    "Дата инвентаризации", "Отчётный месяц", "Свиноматки",
+    "Свиноматки в родильном отделении", "Всего свиноматок", "Поросята-сосуны",
+    "Отъём", "Доращивание", "Откорм ст.", "Откорм нов.", "Ремонтные свинки",
+    "Свиноматки (выбраковка)", "Хряки", "Итого по инвентаризации",
+    "Статус применения", "Примечание"
+  ]];
+  const notes = [[
+    "Укажите фактическую дату инвентаризации. Если дата неизвестна, используется последний календарный день месяца.",
+    "Заполняется автоматически по дате инвентаризации.",
+    "Поголовье свиноматок вне родильного отделения.",
+    "Поголовье свиноматок в родильном отделении.",
+    "Автоматическая сумма двух граф по свиноматкам.",
+    "Общее количество поросят-сосунов.",
+    "Общее количество поросят на отъёме.",
+    "Общее количество на доращивании.",
+    "Общее количество в старом откормочном отделении.",
+    "Общее количество в новом откормочном отделении.",
+    "При наличии значения требуется указание, в какую категорию его включить.",
+    "При наличии значения требуется указание, в какую категорию его включить.",
+    "При наличии значения требуется указание, в какую категорию его включить.",
+    "Автоматическая проверочная сумма всех исходных категорий.",
+    "Заполняется автоматически. Не редактировать.",
+    "Укажите источник, уточнение категории или другую необходимую информацию."
+  ]];
+  sheet.getRange(1, 1, 1, GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT)
+    .setValues(headers).setNotes(notes).setBackground("#274e13")
+    .setFontColor("#ffffff").setFontWeight("bold")
+    .setHorizontalAlignment("center").setVerticalAlignment("middle").setWrap(true);
+
+  function formulas(formula) {
+    return Array.from({ length: dataRowCount }, function() { return [formula]; });
+  }
+  sheet.getRange(firstDataRow, c.REPORTING_MONTH, dataRowCount, 1)
+    .setFormulasR1C1(formulas('=IF(RC[-1]="","",TEXT(RC[-1],"yyyy-mm"))'));
+  sheet.getRange(firstDataRow, c.SOW_TOTAL, dataRowCount, 1)
+    .setFormulasR1C1(formulas('=IF(COUNTA(RC[-2]:RC[-1])=0,"",SUM(RC[-2]:RC[-1]))'));
+  sheet.getRange(firstDataRow, c.AUDIT_TOTAL, dataRowCount, 1)
+    .setFormulasR1C1(formulas('=IF(COUNTA(RC[-11]:RC[-10],RC[-8]:RC[-1])=0,"",SUM(RC[-11]:RC[-10],RC[-8]:RC[-1]))'));
+
+  const numberValidation = SpreadsheetApp.newDataValidation()
+    .requireNumberGreaterThanOrEqualTo(0).setAllowInvalid(false)
+    .setHelpText("Введите целое количество голов 0 или больше.").build();
+  const dateValidation = SpreadsheetApp.newDataValidation().requireDate()
+    .setAllowInvalid(false).setHelpText("Введите дату фактической инвентаризации.").build();
+  sheet.getRange(firstDataRow, c.AUDIT_DATE, dataRowCount, 1)
+    .setDataValidation(dateValidation).setNumberFormat("dd.MM.yyyy").setBackground("#fff2cc");
+  [[c.SOW_MAIN, 2], [c.SUCKLING, 8]].forEach(function(spec) {
+    sheet.getRange(firstDataRow, spec[0], dataRowCount, spec[1])
+      .setDataValidation(numberValidation).setNumberFormat("0").setBackground("#fff2cc");
+  });
+  sheet.getRange(firstDataRow, c.NOTE, dataRowCount, 1).setBackground("#fff2cc").setWrap(true);
+  [c.REPORTING_MONTH, c.SOW_TOTAL, c.AUDIT_TOTAL, c.STATUS].forEach(function(column) {
+    sheet.getRange(firstDataRow, column, dataRowCount, 1).setBackground("#eeeeee");
+  });
+  sheet.getRange(firstDataRow, 1, dataRowCount, GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT)
+    .setVerticalAlignment("middle");
+  sheet.setFrozenRows(1);
+  sheet.setHiddenGridlines(true);
+  sheet.setRowHeight(1, 42);
+  [125,100,95,180,115,120,85,95,95,95,120,165,80,145,235,330].forEach(function(width, index) {
+    sheet.setColumnWidth(index + 1, width);
+  });
+}
+
+
+function seedInitialGroupInventoryAuditData_(sheet) {
+  const c = GROUP_INVENTORY_AUDIT_CONFIG.COL;
+  const existing = sheet.getRange(
+    GROUP_INVENTORY_AUDIT_CONFIG.FIRST_DATA_ROW,
+    1,
+    GROUP_INVENTORY_AUDIT_CONFIG.MANAGED_ROWS - 1,
+    c.BOARS
+  ).getValues();
+  const inputIndexes = [0,2,3,5,6,7,8,9,10,11,12];
+  if (existing.some(function(row) {
+    return inputIndexes.some(function(index) {
+      return !(row[index] === "" || row[index] === null || row[index] === undefined);
+    });
+  })) return false;
+
+  const sourceNote = "Источник: поголовье 2026.xlsx. Точная дата не указана; применён последний календарный день месяца.";
+  const rows = GROUP_INVENTORY_AUDIT_CONFIG.INITIAL_DATA.map(function(item) {
+    const row = Array(GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT).fill("");
+    row[c.AUDIT_DATE - 1] = new Date(DASHBOARD_CONFIG.YEAR, item.month, 0);
+    row[c.SOW_MAIN - 1] = item.sowMain;
+    row[c.SOW_FARROWING - 1] = item.sowFarrowing;
+    row[c.SUCKLING - 1] = item.suckling;
+    row[c.WEANED - 1] = item.weaned;
+    row[c.GROWING - 1] = item.growing;
+    row[c.FATTENING_OLD - 1] = item.fatteningOld;
+    row[c.FATTENING_NEW - 1] = item.fatteningNew;
+    row[c.NOTE - 1] = sourceNote;
+    return row;
+  });
+  sheet.getRange(GROUP_INVENTORY_AUDIT_CONFIG.FIRST_DATA_ROW, 1, rows.length, GROUP_INVENTORY_AUDIT_CONFIG.COLUMN_COUNT).setValues(rows);
+  /* setValues가 계산 열 수식을 비우므로 다시 설정한다. */
+  configureGroupInventoryAuditSheet_(sheet);
+  return true;
+}
+
+
+/***************************************************************
  * 월작업일지 J열 실사두수 입력란 설정
  *
  * 기존 J열 값은 지우지 않는다.
@@ -4513,12 +5163,16 @@ function showInventoryAuditSummary() {
 
 
   const lines = [
-    "=== 돈사/돈방별 실사보정 점검 ==="
+    "=== 상세/구분 합계 실사보정 점검 ==="
   ];
 
-
-  let count =
-    0;
+  const detailedLines = [];
+  const groupLines = [];
+  const issueLines = [];
+  let detailedCount = 0;
+  let groupDateCount = 0;
+  let groupValueCount = 0;
+  const appliedGroupRows = new Set();
 
 
   monthlyAnalyses.forEach(
@@ -4532,11 +5186,10 @@ function showInventoryAuditSummary() {
               .forEach(
                 function(audit) {
 
-                  count +=
-                    1;
+                  detailedCount += 1;
 
 
-                  lines.push(
+                  detailedLines.push(
                     [
                       info.sheetName,
                       formatDateForDisplay_(
@@ -4554,28 +5207,84 @@ function showInventoryAuditSummary() {
                   );
                 }
               );
+
+            const groupRecord = block.groupInventoryAuditRecord || null;
+            if (groupRecord && groupRecord.applied && !appliedGroupRows.has(groupRecord.rowNum)) {
+              groupDateCount += 1;
+              appliedGroupRows.add(groupRecord.rowNum);
+              groupLines.push([
+                info.sheetName,
+                formatDateForDisplay_(block.date),
+                GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME + "!A" + groupRecord.rowNum,
+                "전체 실사=" + groupRecord.expectedTotal
+              ].join(" | "));
+            }
+            (block.appliedGroupInventoryAudits || []).forEach(function(audit) {
+              groupValueCount += 1;
+              groupLines.push([
+                "  " + groupInventoryAuditLabel_(audit.groupKey),
+                "대상행=" + audit.rowNum,
+                "보정 전=" + audit.previousCalculated,
+                "실사=" + audit.actual,
+                "차이=" + audit.correction,
+                "승계 보정값=" + audit.carriedOffset
+              ].join(" | "));
+            });
           }
         );
     }
   );
 
+  const groupContext = monthlyAnalyses.groupInventoryAuditContext || { records: [] };
+  (groupContext.records || []).forEach(function(record) {
+    if (record.applied) return;
+    issueLines.push([
+      GROUP_INVENTORY_AUDIT_CONFIG.SHEET_NAME + "!A" + record.rowNum,
+      record.date ? formatDateForDisplay_(record.date) : "날짜 없음",
+      record.status || GROUP_INVENTORY_AUDIT_CONFIG.STATUS.NOT_APPLIED
+    ].join(" | "));
+  });
 
-  if (count === 0) {
-    lines.push(
-      "입력된 실사두수가 없습니다."
-    );
+  if (detailedLines.length) {
+    lines.push("", "[상세 J열 실사]");
+    Array.prototype.push.apply(lines, detailedLines);
   }
-
-
+  if (groupLines.length) {
+    lines.push("", "[구분 합계 실사]");
+    Array.prototype.push.apply(lines, groupLines);
+  }
+  if (issueLines.length) {
+    lines.push("", "[구분 합계 미적용/확인 필요]");
+    Array.prototype.push.apply(lines, issueLines);
+  }
+  if (detailedCount === 0 && groupDateCount === 0) {
+    lines.push("", "적용된 실사입력이 없습니다.");
+  }
   lines.push(
-    "총 실사입력: " +
-      count
+    "",
+    "상세 J열 실사입력: " + detailedCount,
+    "구분 합계 실사일: " + groupDateCount,
+    "구분 합계 보정값: " + groupValueCount,
+    "구분 합계 미적용/확인 필요: " + issueLines.length
   );
 
 
   Logger.log(
     lines.join("\n")
   );
+}
+
+
+function groupInventoryAuditLabel_(groupKey) {
+  const labels = {
+    sow: "Всего свиноматок",
+    suckling: "Поросята-сосуны",
+    weaned: "Отъём",
+    growing: "Доращивание",
+    fattening_old: "Откорм ст.",
+    fattening_new: "Откорм нов."
+  };
+  return labels[groupKey] || String(groupKey || "");
 }
 
 
@@ -5494,10 +6203,15 @@ function getMonthlyOutputValues_(analysis) {
 
 
   const source =
-    analysis.outputValues &&
-    analysis.outputValues.length
-      ? analysis.outputValues
-      : analysis.scan.values;
+    analysis.reportingOutputValues &&
+    analysis.reportingOutputValues.length
+      ? analysis.reportingOutputValues
+      : (
+          analysis.outputValues &&
+          analysis.outputValues.length
+            ? analysis.outputValues
+            : analysis.scan.values
+        );
 
 
   return source

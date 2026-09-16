@@ -1,6 +1,6 @@
 /***************************************************************
  * 양돈장 대시보드 자동연동
- * Code.gs v11.2-RC1 (돈사/돈방별 비정기 실사보정)
+ * Code.gs v11.3-RC1 (실사보정 + 신규 월 작업일지 자동생성)
  *
  * =============================================================
  * [행 간격 제거 리팩터링]
@@ -66,6 +66,14 @@
  *   - 보정 차이를 다음 실사일까지 전일/금일 재고에 승계
  *   - 판매/폐사/분만 원인은 실사값만으로 추정하지 않음
  *   - 연동용 출력은 기존 A:I, K:R, K:O 계약 유지
+ *
+ * [v11.3-RC1 신규 월 작업일지 자동생성]
+ *   - 최초 1회 전월 시트를 숨김 템플릿으로 자동 복제
+ *   - 매월 1일 현재 월 시트를 자동 생성, 수동 생성도 지원
+ *   - 템플릿의 수식·서식·병합·유효성·보호 구조를 복제
+ *   - 전월 실사보정 후 최종재고를 새 월 1일 전일재고(D열)로 이월
+ *   - 판매·폐사·분만 원인은 생성하거나 추정하지 않음
+ *   - 기존 대시보드 자동갱신 트리거 및 HTML은 변경하지 않음
  *
  * 보류/유지:
  *   - onEdit/onChange 트리거 구성은 별도 검증 단계에서 정리
@@ -194,6 +202,38 @@ const DASHBOARD_CONFIG = {
 };
 
 
+/*
+ * 신규 월 작업일지 자동생성 설정.
+ * 템플릿은 최초 생성 때만 전월 시트에서 만들며, 이후 직접 수정하지 않는다.
+ */
+const MONTHLY_SHEET_CREATION_CONFIG = {
+
+  TEMPLATE_SHEET_NAME:
+    "월작업일지_자동생성_템플릿",
+
+  AUTO_CREATE_HANDLER:
+    "createCurrentMonthSheetOnFirstDay",
+
+  AUTO_CREATE_HOUR:
+    1,
+
+  FIRST_DAY:
+    1,
+
+  PREVIOUS_STOCK_COL:
+    4,  // D: 전일재고
+
+  CURRENT_STOCK_COL:
+    9,  // I: 금일재고
+
+  FIRST_ENTRY_COL:
+    4,  // D
+
+  LAST_ENTRY_COL:
+    10  // J (실사두수 포함)
+};
+
+
 /***************************************************************
  * 메뉴
  ***************************************************************/
@@ -246,6 +286,23 @@ function onOpen() {
     .addItem(
       "실사두수 J열 입력란 설정",
       "setupInventoryAuditInputColumn"
+    )
+
+    .addSeparator()
+
+    .addItem(
+      "신규 월 작업일지 생성…",
+      "promptCreateMonthlySheet"
+    )
+
+    .addItem(
+      "다음 월 작업일지 생성",
+      "createNextMonthlySheet"
+    )
+
+    .addItem(
+      "월 작업일지 자동생성 설치",
+      "installMonthlySheetCreationTrigger"
     )
 
     .addSeparator()
@@ -5734,5 +5791,1336 @@ function installDashboardTriggers() {
 
   Logger.log(
     "대시보드 자동 갱신 트리거 설치 완료"
+  );
+}
+
+
+/***************************************************************
+ * 신규 월 작업일지 자동생성
+ *
+ * 원칙
+ * - 전월 원본 시트는 변경하지 않는다.
+ * - 최초 한 번만 전월 시트를 숨김 템플릿으로 복제한다.
+ * - 새 월은 템플릿을 복제한 뒤, 직접입력 수치만 비운다.
+ * - 수식·서식·병합·유효성·보호는 Sheet.copyTo() 결과를 유지한다.
+ * - 전월의 v11.2 실사보정 후 최종재고만 새 월 1일 D열로 이월한다.
+ ***************************************************************/
+
+function promptCreateMonthlySheet() {
+
+  const ui =
+    SpreadsheetApp.getUi();
+
+
+  const response =
+    ui.prompt(
+      "신규 월 작업일지 생성",
+      "생성할 월을 YYYY-MM 형식으로 입력하세요.\n예: 2026-10",
+      ui.ButtonSet.OK_CANCEL
+    );
+
+
+  if (
+    response.getSelectedButton() !==
+    ui.Button.OK
+  ) {
+
+    return;
+  }
+
+
+  try {
+
+    const target =
+      parseMonthlySheetTarget_(
+        response.getResponseText()
+      );
+
+
+    const result =
+      createMonthlySheetForTarget_(
+        target.year,
+        target.month
+      );
+
+
+    ui.alert(
+      result.message
+    );
+
+  } catch (error) {
+
+    ui.alert(
+      "신규 월 작업일지 생성 중단\n\n" +
+      error.message
+    );
+  }
+}
+
+
+function createNextMonthlySheet() {
+
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+
+  try {
+
+    const next =
+      findNextMonthlySheetTarget_(
+        ss
+      );
+
+
+    const result =
+      createMonthlySheetForTarget_(
+        next.year,
+        next.month
+      );
+
+
+    SpreadsheetApp
+      .getUi()
+      .alert(
+        result.message
+      );
+
+  } catch (error) {
+
+    SpreadsheetApp
+      .getUi()
+      .alert(
+        "다음 월 작업일지 생성 중단\n\n" +
+        error.message
+      );
+  }
+}
+
+
+/*
+ * 월 1일 설치형 시간 트리거용 함수.
+ * 이미 같은 이름의 월 시트가 있으면 중복 생성 없이 종료한다.
+ */
+function createCurrentMonthSheetOnFirstDay() {
+
+  const now =
+    new Date();
+
+
+  const timeZone =
+    SpreadsheetApp
+      .getActiveSpreadsheet()
+      .getSpreadsheetTimeZone();
+
+
+  const year =
+    Number(
+      Utilities.formatDate(
+        now,
+        timeZone,
+        "yyyy"
+      )
+    );
+
+
+  const month =
+    Number(
+      Utilities.formatDate(
+        now,
+        timeZone,
+        "M"
+      )
+    );
+
+
+  try {
+
+    const result =
+      createMonthlySheetForTarget_(
+        year,
+        month
+      );
+
+
+    Logger.log(
+      result.message
+    );
+
+  } catch (error) {
+
+    Logger.log(
+      "=== 월 작업일지 자동생성 중단 ===\n" +
+      error.message
+    );
+  }
+}
+
+
+function installMonthlySheetCreationTrigger() {
+
+  ScriptApp
+    .getProjectTriggers()
+    .forEach(
+      function(trigger) {
+
+        if (
+          trigger.getHandlerFunction() ===
+          MONTHLY_SHEET_CREATION_CONFIG
+            .AUTO_CREATE_HANDLER
+        ) {
+
+          ScriptApp.deleteTrigger(
+            trigger
+          );
+        }
+      }
+    );
+
+
+  ScriptApp
+    .newTrigger(
+      MONTHLY_SHEET_CREATION_CONFIG
+        .AUTO_CREATE_HANDLER
+    )
+    .timeBased()
+    .onMonthDay(
+      MONTHLY_SHEET_CREATION_CONFIG
+        .FIRST_DAY
+    )
+    .atHour(
+      MONTHLY_SHEET_CREATION_CONFIG
+        .AUTO_CREATE_HOUR
+    )
+    .create();
+
+
+  Logger.log(
+    "월 작업일지 자동생성 트리거 설치 완료: 매월 1일 01시경 실행"
+  );
+}
+
+
+function createMonthlySheetForTarget_(
+  year,
+  month
+) {
+
+  validateMonthlySheetTarget_(
+    year,
+    month
+  );
+
+
+  const ss =
+    SpreadsheetApp.getActiveSpreadsheet();
+
+
+  const targetSheetName =
+    getMonthlySheetName_(
+      year,
+      month
+    );
+
+
+  const existing =
+    ss.getSheetByName(
+      targetSheetName
+    );
+
+
+  if (existing) {
+
+    return {
+      created:
+        false,
+
+      sheet:
+        existing,
+
+      message:
+        targetSheetName +
+        " 시트가 이미 있으므로 새로 만들지 않았습니다."
+    };
+  }
+
+
+  const previous =
+    getPreviousMonthTarget_(
+      year,
+      month
+    );
+
+
+  const previousSheetName =
+    getMonthlySheetName_(
+      previous.year,
+      previous.month
+    );
+
+
+  const previousSheet =
+    ss.getSheetByName(
+      previousSheetName
+    );
+
+
+  if (!previousSheet) {
+
+    throw new Error(
+      "전월 원본 시트가 없습니다: " +
+      previousSheetName +
+      "\n전월 시트를 먼저 확인한 뒤 다시 실행하세요."
+    );
+  }
+
+
+  const monthlyAnalyses =
+    collectMonthlyAnalyses_(
+      ss
+    );
+
+
+  const previousInfo =
+    findMonthlyAnalysisBySheetName_(
+      monthlyAnalyses,
+      previousSheetName
+    );
+
+
+  if (
+    !previousInfo ||
+    !previousInfo.hasValidInput ||
+    !previousInfo.validBlocks.length
+  ) {
+
+    throw new Error(
+      previousSheetName +
+      "에 유효 작업일지가 없어 최종재고를 안전하게 이월할 수 없습니다."
+    );
+  }
+
+
+  const closingInventory =
+    buildAdjustedClosingInventoryMap_(
+      previousInfo
+    );
+
+
+  if (!closingInventory.size) {
+
+    throw new Error(
+      previousSheetName +
+      "에서 이월 가능한 상세 최종재고를 찾지 못했습니다."
+    );
+  }
+
+
+  const templateSheet =
+    ensureMonthlyDiaryTemplate_(
+      ss,
+      previousSheet
+    );
+
+
+  const targetSheet =
+    templateSheet.copyTo(
+      ss
+    );
+
+
+  targetSheet
+    .setName(
+      targetSheetName
+    )
+    .showSheet();
+
+
+  const copiedBlocks =
+    collectAllDateBlocks_(
+      targetSheet
+    );
+
+
+  if (!copiedBlocks.length) {
+
+    throw new Error(
+      "자동생성 템플릿에서 날짜 블록을 찾지 못했습니다. 템플릿 구조를 확인하세요."
+    );
+  }
+
+
+  clearManualMonthlyEntries_(
+    targetSheet,
+    copiedBlocks
+  );
+
+
+  updateMonthlyDateCells_(
+    targetSheet,
+    copiedBlocks,
+    year,
+    month
+  );
+
+
+  SpreadsheetApp.flush();
+
+
+  const targetInfo =
+    analyzeMonthlySheet_(
+      targetSheet,
+      targetSheetName,
+      month
+    );
+
+
+  const firstBlock =
+    findFirstCalendarDayBlock_(
+      targetInfo.allBlocks
+    );
+
+
+  if (!firstBlock) {
+
+    throw new Error(
+      "새 월 시트에서 " +
+      year + "." + month + ".01 날짜 블록을 찾지 못했습니다."
+    );
+  }
+
+
+  const carriedCount =
+    carryClosingInventoryToFirstDay_(
+      targetSheet,
+      targetInfo.scan,
+      firstBlock,
+      closingInventory
+    );
+
+
+  if (!carriedCount) {
+
+    throw new Error(
+      "전월 최종재고와 새 월 1일 돈사·돈방 구조가 일치하지 않아 이월하지 않았습니다."
+    );
+  }
+
+
+  configureInventoryAuditInputForMonthlySheet_(
+    targetSheet,
+    targetSheetName,
+    month
+  );
+
+
+  refreshDashboardLinks();
+
+
+  Logger.log(
+    [
+      "=== 신규 월 작업일지 생성 완료 ===",
+      "생성 시트: " + targetSheetName,
+      "템플릿: " + templateSheet.getName(),
+      "전월: " + previousSheetName,
+      "실사보정 후 이월 재고행: " + carriedCount,
+      "대시보드 연동: 갱신 완료"
+    ].join("\n")
+  );
+
+
+  return {
+    created:
+      true,
+
+    sheet:
+      targetSheet,
+
+    message:
+      targetSheetName +
+      " 시트를 생성했습니다.\n" +
+      "전월 실사보정 후 최종재고 " +
+      carriedCount +
+      "개 상세행을 1일 전일재고로 이월했고, 대시보드 연동도 갱신했습니다."
+  };
+}
+
+
+function ensureMonthlyDiaryTemplate_(
+  ss,
+  sourceSheet
+) {
+
+  let templateSheet =
+    ss.getSheetByName(
+      MONTHLY_SHEET_CREATION_CONFIG
+        .TEMPLATE_SHEET_NAME
+    );
+
+
+  if (templateSheet) {
+    return templateSheet;
+  }
+
+
+  templateSheet =
+    sourceSheet.copyTo(
+      ss
+    );
+
+
+  templateSheet
+    .setName(
+      MONTHLY_SHEET_CREATION_CONFIG
+        .TEMPLATE_SHEET_NAME
+    )
+    .hideSheet();
+
+
+  Logger.log(
+    "월 작업일지 자동생성 템플릿을 만들었습니다: " +
+    templateSheet.getName()
+  );
+
+
+  return templateSheet;
+}
+
+
+function clearManualMonthlyEntries_(
+  sheet,
+  dateBlocks
+) {
+
+  const lastRow =
+    Math.max(
+      1,
+      sheet.getLastRow()
+    );
+
+
+  const scanRange =
+    sheet.getRange(
+      1,
+      1,
+      lastRow,
+      DASHBOARD_CONFIG.SOURCE_DATA_COLS
+    );
+
+
+  const values =
+    scanRange.getValues();
+
+
+  const displayValues =
+    scanRange.getDisplayValues();
+
+
+  const formulas =
+    scanRange.getFormulas();
+
+
+  const cellsToClear = [];
+
+
+  (dateBlocks || [])
+    .forEach(
+      function(block) {
+
+        for (
+          let rowNum = block.dateBlockStartRow;
+          rowNum <= block.copyEndRow;
+          rowNum++
+        ) {
+
+          const rowIndex =
+            rowNum - 1;
+
+
+          for (
+            let column =
+              MONTHLY_SHEET_CREATION_CONFIG
+                .FIRST_ENTRY_COL;
+            column <=
+              MONTHLY_SHEET_CREATION_CONFIG
+                .LAST_ENTRY_COL;
+            column++
+          ) {
+
+            const zeroBasedCol =
+              column - 1;
+
+
+            if (
+              String(
+                formulas[rowIndex][zeroBasedCol] || ""
+              ).trim() !== ""
+            ) {
+
+              continue;
+            }
+
+
+            if (
+              hasNumericCell_(
+                displayValues[rowIndex],
+                values[rowIndex],
+                zeroBasedCol
+              )
+            ) {
+
+              cellsToClear.push(
+                columnNumberToLetter_(column) +
+                rowNum
+              );
+            }
+          }
+        }
+      }
+    );
+
+
+  if (cellsToClear.length) {
+
+    sheet
+      .getRangeList(
+        cellsToClear
+      )
+      .clearContent();
+  }
+}
+
+
+function updateMonthlyDateCells_(
+  sheet,
+  dateBlocks,
+  targetYear,
+  targetMonth
+) {
+
+  const daysInTargetMonth =
+    new Date(
+      targetYear,
+      targetMonth,
+      0
+    ).getDate();
+
+
+  const scan =
+    scanMonthlySheet_(
+      sheet
+    );
+
+
+  let updatedCount =
+    0;
+
+
+  (dateBlocks || [])
+    .forEach(
+      function(block) {
+
+        const rowIndex =
+          block.dateBlockStartRow - 1;
+
+
+        const sourceDate =
+          block.date;
+
+
+        const targetDate =
+          sourceDate.getDate() <= daysInTargetMonth
+            ? new Date(
+                targetYear,
+                targetMonth - 1,
+                sourceDate.getDate()
+              )
+            : null;
+
+
+        for (
+          let col = 0;
+          col < DASHBOARD_CONFIG.MAX_DATA_COLS;
+          col++
+        ) {
+
+          const formula =
+            String(
+              scan.formulas[rowIndex][col] || ""
+            ).trim();
+
+
+          if (formula !== "") {
+            continue;
+          }
+
+
+          if (
+            !parseDateFromCell_(
+              scan.values[rowIndex][col]
+            )
+          ) {
+
+            continue;
+          }
+
+
+          const cell =
+            sheet.getRange(
+              block.dateBlockStartRow,
+              col + 1
+            );
+
+
+          if (targetDate) {
+
+            cell.setValue(
+              targetDate
+            );
+
+          } else {
+
+            cell.clearContent();
+          }
+
+
+          updatedCount +=
+            1;
+        }
+      }
+    );
+
+
+  if (!updatedCount) {
+
+    throw new Error(
+      "템플릿의 날짜 셀을 갱신하지 못했습니다. 날짜가 직접입력 값인지 확인하세요."
+    );
+  }
+}
+
+
+function buildAdjustedClosingInventoryMap_(
+  monthlyInfo
+) {
+
+  const result =
+    new Map();
+
+
+  const blocks =
+    (monthlyInfo.validBlocks || [])
+      .slice()
+      .sort(
+        function(a, b) {
+
+          return (
+            a.date.getTime() -
+            b.date.getTime()
+          );
+        }
+      );
+
+
+  if (!blocks.length) {
+    return result;
+  }
+
+
+  const lastBlock =
+    blocks[
+      blocks.length - 1
+    ];
+
+
+  const adjustedScan =
+    monthlyInfo.adjustedScan ||
+    monthlyInfo.scan;
+
+
+  collectInventoryEntityRows_(
+    adjustedScan,
+    lastBlock,
+    true
+  )
+    .forEach(
+      function(item) {
+
+        result.set(
+          item.key,
+          item.currentStock
+        );
+      }
+    );
+
+
+  return result;
+}
+
+
+function carryClosingInventoryToFirstDay_(
+  sheet,
+  targetScan,
+  firstBlock,
+  closingInventory
+) {
+
+  let carriedCount =
+    0;
+
+
+  collectInventoryEntityRows_(
+    targetScan,
+    firstBlock,
+    false
+  )
+    .forEach(
+      function(item) {
+
+        if (
+          !closingInventory.has(
+            item.key
+          )
+        ) {
+
+          return;
+        }
+
+
+        sheet
+          .getRange(
+            item.rowNum,
+            MONTHLY_SHEET_CREATION_CONFIG
+              .PREVIOUS_STOCK_COL
+          )
+          .setValue(
+            closingInventory.get(
+              item.key
+            )
+          );
+
+
+        carriedCount +=
+          1;
+      }
+    );
+
+
+  return carriedCount;
+}
+
+
+/*
+ * 실사보정의 entityKey 규칙과 동일한 section|sub#occurrence 식별자를 쓴다.
+ * 합계·소계는 이월 대상이 아니며, 상세 돈사/돈방 행만 처리한다.
+ */
+function collectInventoryEntityRows_(
+  scan,
+  block,
+  requireCurrentStock
+) {
+
+  const result = [];
+
+  const occurrenceMap =
+    new Map();
+
+
+  let currentSection =
+    "";
+
+
+  let inAggregateSummary =
+    false;
+
+
+  for (
+    let rowNum = block.dateBlockStartRow;
+    rowNum <= block.copyEndRow;
+    rowNum++
+  ) {
+
+    const rowIndex =
+      rowNum - 1;
+
+
+    const valueRow =
+      scan.values[rowIndex];
+
+
+    const displayRow =
+      scan.displayValues[rowIndex];
+
+
+    if (!valueRow || !displayRow) {
+      continue;
+    }
+
+
+    const section =
+      cellText_(
+        displayRow,
+        valueRow,
+        0
+      );
+
+
+    const sub =
+      cellText_(
+        displayRow,
+        valueRow,
+        2
+      );
+
+
+    if (
+      section &&
+      !isAnyTotalLabel_(section)
+    ) {
+
+      inAggregateSummary =
+        false;
+
+      currentSection =
+        section;
+    }
+
+
+    if (
+      isGrandTotalLabel_(section) ||
+      isGrandTotalLabel_(sub) ||
+      isSubTotalLabel_(section) ||
+      isSubTotalLabel_(sub)
+    ) {
+
+      inAggregateSummary =
+        true;
+
+      continue;
+    }
+
+
+    if (inAggregateSummary) {
+      continue;
+    }
+
+
+    const sectionKey =
+      normalizeEntityText_(
+        currentSection
+      );
+
+
+    const subKey =
+      normalizeEntityText_(
+        sub
+      );
+
+
+    if (
+      !sectionKey &&
+      !subKey
+    ) {
+
+      continue;
+    }
+
+
+    if (
+      requireCurrentStock &&
+      !hasNumericCell_(
+        displayRow,
+        valueRow,
+        MONTHLY_SHEET_CREATION_CONFIG
+          .CURRENT_STOCK_COL - 1
+      )
+    ) {
+
+      continue;
+    }
+
+
+    const baseKey =
+      sectionKey +
+      "|" +
+      subKey;
+
+
+    const occurrence =
+      Number(
+        occurrenceMap.get(
+          baseKey
+        ) || 0
+      ) +
+      1;
+
+
+    occurrenceMap.set(
+      baseKey,
+      occurrence
+    );
+
+
+    result.push({
+      key:
+        baseKey +
+        "#" +
+        occurrence,
+
+      rowNum:
+        rowNum,
+
+      currentStock:
+        cellNumber_(
+          displayRow,
+          valueRow,
+          MONTHLY_SHEET_CREATION_CONFIG
+            .CURRENT_STOCK_COL - 1
+        )
+    });
+  }
+
+
+  return result;
+}
+
+
+function configureInventoryAuditInputForMonthlySheet_(
+  sheet,
+  sheetName,
+  monthIndex
+) {
+
+  const info =
+    analyzeMonthlySheet_(
+      sheet,
+      sheetName,
+      monthIndex
+    );
+
+
+  const inputCells = [];
+
+
+  (info.allBlocks || [])
+    .forEach(
+      function(block) {
+
+        const rowCount =
+          block.copyEndRow -
+          block.dateBlockStartRow +
+          1;
+
+
+        sheet
+          .getRange(
+            block.dateBlockStartRow,
+            9,
+            rowCount,
+            1
+          )
+          .copyFormatToRange(
+            sheet,
+            DASHBOARD_CONFIG.INVENTORY_AUDIT_COL,
+            DASHBOARD_CONFIG.INVENTORY_AUDIT_COL,
+            block.dateBlockStartRow,
+            block.copyEndRow
+          );
+
+
+        const headerRow =
+          block.dateBlockStartRow +
+          1;
+
+
+        if (headerRow <= block.copyEndRow) {
+
+          sheet
+            .getRange(
+              headerRow,
+              DASHBOARD_CONFIG.INVENTORY_AUDIT_COL
+            )
+            .setValue(
+              DASHBOARD_CONFIG.INVENTORY_AUDIT_HEADER
+            )
+            .setNote(
+              "실사한 경우에만 실제 개체수를 0 이상의 정수로 입력합니다. " +
+              "빈칸은 실사 없음이며 숫자 0도 유효합니다."
+            );
+        }
+
+
+        collectInventoryAuditCandidateCells_(
+          info.scan,
+          block
+        )
+          .forEach(
+            function(cell) {
+              inputCells.push(cell);
+            }
+          );
+      }
+    );
+
+
+  if (inputCells.length) {
+
+    sheet
+      .getRangeList(
+        inputCells
+      )
+      .setBackground(
+        "#fff2cc"
+      )
+      .setNumberFormat(
+        "0"
+      );
+  }
+}
+
+
+function collectAllDateBlocks_(sheet) {
+
+  const scan =
+    scanMonthlySheet_(
+      sheet
+    );
+
+
+  const dateRows = [];
+
+
+  for (
+    let rowNum = 1;
+    rowNum <= scan.lastRow;
+    rowNum++
+  ) {
+
+    const date =
+      getDateFromRow_(
+        scan.values[rowNum - 1],
+        scan.displayValues[rowNum - 1]
+      );
+
+
+    if (!date) {
+      continue;
+    }
+
+
+    dateRows.push({
+      date:
+        date,
+
+      dateBlockStartRow:
+        rowNum,
+
+      nextDateRow:
+        null,
+
+      copyEndRow:
+        scan.lastRow
+    });
+  }
+
+
+  dateRows.forEach(
+    function(block, index) {
+
+      const next =
+        dateRows[index + 1];
+
+
+      if (next) {
+
+        block.nextDateRow =
+          next.dateBlockStartRow;
+
+        block.copyEndRow =
+          next.dateBlockStartRow - 1;
+      }
+    }
+  );
+
+
+  return dateRows;
+}
+
+
+function findFirstCalendarDayBlock_(blocks) {
+
+  return (blocks || [])
+    .filter(
+      function(block) {
+
+        return (
+          block &&
+          block.date &&
+          block.date.getDate() === 1
+        );
+      }
+    )
+    .sort(
+      function(a, b) {
+
+        return (
+          a.dateBlockStartRow -
+          b.dateBlockStartRow
+        );
+      }
+    )[0] || null;
+}
+
+
+function findMonthlyAnalysisBySheetName_(
+  analyses,
+  sheetName
+) {
+
+  return (analyses || [])
+    .filter(
+      function(info) {
+
+        return (
+          info &&
+          info.sheetName === sheetName
+        );
+      }
+    )[0] || null;
+}
+
+
+function findNextMonthlySheetTarget_(ss) {
+
+  let latestMonth =
+    0;
+
+
+  DASHBOARD_CONFIG.MONTHS_RU
+    .forEach(
+      function(monthName, index) {
+
+        if (
+          ss.getSheetByName(
+            monthName +
+            " " +
+            DASHBOARD_CONFIG.YEAR
+          )
+        ) {
+
+          latestMonth =
+            index + 1;
+        }
+      }
+    );
+
+
+  if (!latestMonth) {
+
+    throw new Error(
+      "기준이 될 기존 월 작업일지 시트를 찾지 못했습니다."
+    );
+  }
+
+
+  if (latestMonth >= 12) {
+
+    throw new Error(
+      "다음 연도 자동생성은 연도 전환 시 DASHBOARD_CONFIG.YEAR 갱신 후 진행해야 합니다."
+    );
+  }
+
+
+  return {
+    year:
+      DASHBOARD_CONFIG.YEAR,
+
+    month:
+      latestMonth + 1
+  };
+}
+
+
+function parseMonthlySheetTarget_(text) {
+
+  const match =
+    String(text || "")
+      .trim()
+      .match(
+        /^(20\d{2})\s*[-./]\s*(0?[1-9]|1[0-2])$/
+      );
+
+
+  if (!match) {
+
+    throw new Error(
+      "입력 형식이 올바르지 않습니다. YYYY-MM 형식으로 입력하세요."
+    );
+  }
+
+
+  return {
+    year:
+      Number(match[1]),
+
+    month:
+      Number(match[2])
+  };
+}
+
+
+function validateMonthlySheetTarget_(
+  year,
+  month
+) {
+
+  if (
+    year !== DASHBOARD_CONFIG.YEAR ||
+    month < 1 ||
+    month > 12
+  ) {
+
+    throw new Error(
+      "현재 대시보드 연동 기준연도는 " +
+      DASHBOARD_CONFIG.YEAR +
+      "년입니다. 해당 연도 안에서만 생성할 수 있습니다."
+    );
+  }
+}
+
+
+function getPreviousMonthTarget_(
+  year,
+  month
+) {
+
+  const date =
+    new Date(
+      year,
+      month - 2,
+      1
+    );
+
+
+  return {
+    year:
+      date.getFullYear(),
+
+    month:
+      date.getMonth() + 1
+  };
+}
+
+
+function getMonthlySheetName_(
+  year,
+  month
+) {
+
+  return (
+    DASHBOARD_CONFIG.MONTHS_RU[
+      month - 1
+    ] +
+    " " +
+    year
   );
 }

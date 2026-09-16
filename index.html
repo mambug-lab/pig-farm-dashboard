@@ -2867,10 +2867,23 @@ function applyStaticTexts() {
       latestDateLines
     ) {
 
-      const latestDateRaw =
-        readSingleCellValue(
-          latestDateLines
+      const metadataLatestDate =
+        parseDateFromValue(
+          findMetadataValue(
+            lines,
+            "최신 유효일"
+          )
         );
+
+
+      const fallbackLatestDate =
+        metadataLatestDate
+          ? null
+          : parseDateFromValue(
+              readSingleCellValue(
+                latestDateLines
+              )
+            );
 
 
       const msyRaw =
@@ -2890,8 +2903,9 @@ function applyStaticTexts() {
       return {
 
         latestDate:
-          parseDateFromValue(
-            latestDateRaw
+          (
+            metadataLatestDate ||
+            fallbackLatestDate
           ),
 
         validDays:
@@ -5489,12 +5503,6 @@ function applyStaticTexts() {
             ),
 
             loadGvizRowsBySheetRange(
-              MONTHLY_LINK_SHEET_NAME,
-              MONTHLY_LATEST_DATE_RANGE,
-              "최신 유효일 요청"
-            ),
-
-            loadGvizRowsBySheetRange(
               ANNUAL_LINK_SHEET_NAME,
               ANNUAL_SUMMARY_RANGE,
               "연간 집계 요청"
@@ -5510,12 +5518,32 @@ function applyStaticTexts() {
           results[1];
 
 
-        const monthlyLatestDateRows =
+        const annualSummaryRows =
           results[2];
 
 
-        const annualSummaryRows =
-          results[3];
+        let monthlyLatestDateRows =
+          [];
+
+
+        const metadataCheck =
+          readMonthlyMetadata(
+            monthlyMetaRows,
+            monthlyLatestDateRows
+          );
+
+
+        if (
+          !metadataCheck.latestDate
+        ) {
+
+          monthlyLatestDateRows =
+            await loadGvizRowsBySheetRange(
+              MONTHLY_LINK_SHEET_NAME,
+              MONTHLY_LATEST_DATE_RANGE,
+              "최신 유효일 fallback 요청"
+            );
+        }
 
 
         const sourceText =
@@ -5593,12 +5621,12 @@ function applyStaticTexts() {
             MONTHLY_META_RANGE
           )}<br>
 
-          최신 유효일 요청:
+          최신 유효일 fallback:
           ${escapeHtml(
             MONTHLY_LINK_SHEET_NAME +
             "!" +
             MONTHLY_LATEST_DATE_RANGE
-          )}<br>
+          )} (월간 메타에 최신일이 없을 때만 요청)<br>
 
           연간 집계 요청:
           ${escapeHtml(

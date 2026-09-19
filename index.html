@@ -5437,7 +5437,8 @@ function applyStaticTexts() {
         .toLocaleString(
           getLang() === "ru"
             ? "ru-RU"
-            : "ko-KR"
+            : "ko-KR",
+          { timeZone: "Asia/Vladivostok", timeZoneName: "short" }
         );
     }
 

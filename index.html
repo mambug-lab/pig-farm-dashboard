@@ -1260,7 +1260,7 @@
 
 
     const MONTHLY_META_RANGE =
-      "K1:R10";
+      "K1:R12";
 
 
     const MONTHLY_LATEST_DATE_RANGE =
@@ -3271,9 +3271,6 @@ function applyStaticTexts() {
 
       const result = [];
 
-      const seen =
-        new Set();
-
       let currentSection =
         "";
 
@@ -3416,41 +3413,6 @@ function applyStaticTexts() {
                 ]
               )
           };
-
-
-          const key = [
-
-            normalizeText(
-              item.section
-            ),
-
-            normalizeText(
-              item.sub
-            ),
-
-            item.previous,
-            item.incoming,
-            item.outgoing,
-            item.loss,
-            item.sale,
-            item.current
-
-          ].join("|");
-
-
-          if (
-            seen.has(
-              key
-            )
-          ) {
-
-            return;
-          }
-
-
-          seen.add(
-            key
-          );
 
 
           result.push(
@@ -3752,9 +3714,46 @@ function applyStaticTexts() {
     }
 
 
+    function readOfficialGroupStocks(metaLines, latestDate) {
+      const marker = metaLines.findIndex(function(row) { return row && row[0] === 'GROUP_STOCK_V1'; });
+      if (marker < 0) throw new Error('공식 그룹 재고 메타정보가 없습니다. GS 갱신이 필요합니다.');
+      const date = parseDateFromValue(metaLines[marker][1]);
+      if (!date || date.getFullYear() !== latestDate.getFullYear() ||
+          date.getMonth() !== latestDate.getMonth() || date.getDate() !== latestDate.getDate()) {
+        throw new Error('공식 그룹 재고 기준일이 최신 유효일과 다릅니다.');
+      }
+      const result = new Map();
+      const expected = ['sow', 'suckling', 'weaned', 'growing', 'fattening'];
+      metaLines.slice(marker + 2, marker + 7).forEach(function(row) {
+        if (!row || expected.indexOf(row[0]) < 0 || result.has(row[0])) throw new Error('공식 그룹 재고 키 오류');
+        const values = row.slice(1, 8).map(function(v) {
+          if (v === '' || v === null || v === undefined || !Number.isFinite(Number(v))) throw new Error('공식 그룹 재고 숫자 누락');
+          return Number(v);
+        });
+        if (values.length !== 7 || values[1] !== values[3] + values[4]) throw new Error('공식 그룹 재고 계약 불일치');
+        result.set(row[0], {previous: values[0], current: values[1], detailPrevious: values[2],
+          detailCurrent: values[3], residual: values[4], pendingRooms: values[5], count: values[6]});
+      });
+      if (result.size !== expected.length) throw new Error('공식 그룹 재고 행 누락');
+      return result;
+    }
+
+    function groupInventoryExplanation(group) {
+      const lang = getLang();
+      const labels = lang === 'ru'
+        ? ['Официальный итог', 'Сумма помещений', 'Нераспределённая поправка', 'Помещений с общей поправкой']
+        : lang === 'ko_kp'
+          ? ['공식 무리재고', '돈방별 합계', '미배분 무리 보정잔차', '보정 차이 관련 돈방']
+          : ['공식 그룹재고', '상세 돈방 합계', '미배분 그룹 보정잔차', '보정 차이 관련 돈방'];
+      return labels[0] + ': ' + group.current.toLocaleString() + ' · ' +
+        labels[1] + ': ' + group.detailCurrent.toLocaleString() + ' · ' +
+        labels[2] + ': ' + group.residual.toLocaleString() + ' · ' + labels[3] + ': ' + group.pendingRooms;
+    }
+
     function buildGroupSummary(
       detailRows,
-      latestLogRows
+      latestLogRows,
+      officialStocks
     ) {
 
       const groups =
@@ -3830,20 +3829,17 @@ function applyStaticTexts() {
       );
 
 
-      const sowSummary =
-        buildSowSummaryFromLines(
-          latestLogRows
-        );
-
-
-      if (sowSummary) {
-
-        groups.set(
-          "sow",
-          sowSummary
-        );
-      }
-
+      if (!officialStocks) throw new Error('공식 그룹 재고가 없습니다. GS/HTML 버전을 확인하십시오.');
+      groups.forEach(function(group, key) {
+        const official = officialStocks.get(key);
+        if (!official) throw new Error('공식 그룹 재고 누락: ' + key);
+        group.previous = official.previous;
+        group.current = official.current;
+        group.detailCurrent = official.detailCurrent;
+        group.residual = official.residual;
+        group.pendingRooms = official.pendingRooms;
+        group.count = official.count;
+      });
 
       return Array
         .from(
@@ -3989,6 +3985,7 @@ function applyStaticTexts() {
 
                   <td class="current-strong">
                     ${group.current.toLocaleString()}
+                    <small style="display:block;font-size:11px;line-height:1.45;font-weight:400;white-space:normal">${escapeHtml(groupInventoryExplanation(group))}</small>
                   </td>
 
                 </tr>
@@ -5070,11 +5067,12 @@ function applyStaticTexts() {
         );
 
 
-      const groups =
-        buildGroupSummary(
-          detailRows,
-          latestLogRows
-        );
+      const officialStocks = readOfficialGroupStocks(metaLines, meta.latestDate);
+      const groups = buildGroupSummary(detailRows, latestLogRows, officialStocks);
+      const officialTotal = groups.reduce(function(sum, group) { return sum + group.current; }, 0);
+      if (officialTotal !== meta.totalPigs || officialStocks.get('sow').current !== meta.sowCount) {
+        throw new Error('공식 그룹 합계와 총재고/모돈 메타정보가 다릅니다. 원자료를 확인하십시오.');
+      }
 
 
       const fattening =

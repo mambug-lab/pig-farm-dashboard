@@ -1259,12 +1259,10 @@
       "A1:I1215";
 
 
-    const MONTHLY_META_RANGE =
-      "K1:R12";
-
-
-    const MONTHLY_LATEST_DATE_RANGE =
-      "L3:L3";
+    // GViz는 열마다 한 자료형을 정하므로 혼합형 KPI는 한 행씩 읽는다.
+    const MONTHLY_META_RANGES = [
+      "K1:R1", "K2:R2", "K3:R3", "K4:R4", "K6:L6", "K7:R12"
+    ];
 
 
     const ANNUAL_SUMMARY_RANGE =
@@ -1801,7 +1799,6 @@
 
     let latestRows = [];
     let latestMetaRows = [];
-    let latestDateRows = [];
     let latestSourceUsed = "";
 
     let latestAnnualRows = [];
@@ -1940,7 +1937,6 @@ function applyStaticTexts() {
         renderDashboard(
           latestRows,
           latestMetaRows,
-          latestDateRows,
           latestSourceUsed
         );
       }
@@ -2487,7 +2483,7 @@ function applyStaticTexts() {
     }
 
 
-    function gvizResponseToRows(response) {
+    function gvizResponseToRows(response, preferRawValues = false) {
 
       if (
         !response
@@ -2564,6 +2560,13 @@ function applyStaticTexts() {
             }
 
 
+            // 메타정보는 표시 형식으로 반올림하기 전의 숫자를 보존한다.
+            if (preferRawValues && cell.v !== null && cell.v !== undefined) {
+              result.push(cell.v);
+              continue;
+            }
+
+
             if (
               cell.f !== null &&
               cell.f !== undefined
@@ -2603,7 +2606,8 @@ function applyStaticTexts() {
     function loadGvizRowsBySheetRange(
       sheetName,
       range,
-      requestLabel
+      requestLabel,
+      preferRawValues = false
     ) {
 
       return new Promise(
@@ -2679,7 +2683,8 @@ function applyStaticTexts() {
 
                 const rows =
                   gvizResponseToRows(
-                    response
+                    response,
+                    preferRawValues
                   );
 
 
@@ -2774,6 +2779,68 @@ function applyStaticTexts() {
        Apps Script 메타정보 읽기
     ========================================================= */
 
+    async function loadMonthlyMetadataRows() {
+      const parts = await Promise.all(MONTHLY_META_RANGES.map(function(range) {
+        return loadGvizRowsBySheetRange(
+          MONTHLY_LINK_SHEET_NAME, range, "월간 메타 " + range, true
+        );
+      }));
+
+      // 빈 5행을 복원해 기존 K1:R12 소비 함수의 위치 계약을 유지한다.
+      parts.slice(0, 5).forEach(function(rows, index) {
+        if (rows.length !== 1) {
+          throw new Error("월간 메타 행 누락: " + MONTHLY_META_RANGES[index]);
+        }
+      });
+      if (parts[4][0][0] !== "GROUP_STOCK_V1" ||
+          parts[5].length !== 6 || parts[5][0][0] !== "group") {
+        throw new Error("공식 그룹 재고 메타정보 구조가 다릅니다.");
+      }
+      return parts.slice(0, 4).map(function(rows) { return rows[0]; })
+        .concat([[], parts[4][0]], parts[5]);
+    }
+
+
+    function validateMonthlyMetadata(lines) {
+      const labels = [
+        ["누적 예상 MSY", "MSY 상태", "MSY 시작일", "MSY 종료일"],
+        ["MSY 누적 출하", "MSY 평균 모돈", "MSY 누적 달력일", "MSY 유효 작업일"],
+        ["최신 유효일", "월 유효 작업일", "월누적 출하", "월누적 폐사"],
+        ["당일 출하", "당일 폐사", "총 사육두수", "모돈수"]
+      ];
+      labels.forEach(function(rowLabels, rowIndex) {
+        rowLabels.forEach(function(label, pairIndex) {
+          if (displayText((lines[rowIndex] || [])[pairIndex * 2]) !== label) {
+            throw new Error("월간 메타 항목 누락: " + label);
+          }
+        });
+      });
+
+      const numberLabels = [
+        "MSY 누적 출하", "MSY 누적 달력일", "MSY 유효 작업일",
+        "월 유효 작업일", "월누적 출하", "월누적 폐사",
+        "당일 출하", "당일 폐사", "총 사육두수", "모돈수"
+      ];
+      numberLabels.forEach(function(label) {
+        if (!Number.isFinite(findMetadataValue(lines, label))) {
+          throw new Error("월간 메타 숫자 누락 또는 오류: " + label);
+        }
+      });
+
+      const msy = findMetadataValue(lines, "누적 예상 MSY");
+      const avgSow = findMetadataValue(lines, "MSY 평균 모돈");
+      const status = displayText(findMetadataValue(lines, "MSY 상태"));
+      if (!status) throw new Error("월간 메타 항목 누락: MSY 상태");
+      if ((msy !== "" && !Number.isFinite(msy)) ||
+          (avgSow !== "" && !Number.isFinite(avgSow)) ||
+          (status === "정상" && (!Number.isFinite(msy) || !Number.isFinite(avgSow)))) {
+        throw new Error("MSY 메타정보의 상태와 숫자를 확인하십시오.");
+      }
+      if (!parseDateFromValue(findMetadataValue(lines, "최신 유효일"))) {
+        throw new Error("Apps Script 최신 유효일 메타정보를 찾지 못했습니다.");
+      }
+    }
+
     function findMetadataValue(
       lines,
       label
@@ -2823,49 +2890,9 @@ function applyStaticTexts() {
     }
 
 
-    function readSingleCellValue(
-      lines
-    ) {
+    function readMonthlyMetadata(lines) {
 
-      for (
-        let r = 0;
-        r < lines.length;
-        r++
-      ) {
-
-        const row =
-          lines[r] ||
-          [];
-
-
-        for (
-          let c = 0;
-          c < row.length;
-          c++
-        ) {
-
-          if (
-            row[c] !== null &&
-            row[c] !== undefined &&
-            displayText(
-              row[c]
-            ) !== ""
-          ) {
-
-            return row[c];
-          }
-        }
-      }
-
-
-      return null;
-    }
-
-
-    function readMonthlyMetadata(
-      lines,
-      latestDateLines
-    ) {
+      validateMonthlyMetadata(lines);
 
       const metadataLatestDate =
         parseDateFromValue(
@@ -2874,16 +2901,6 @@ function applyStaticTexts() {
             "최신 유효일"
           )
         );
-
-
-      const fallbackLatestDate =
-        metadataLatestDate
-          ? null
-          : parseDateFromValue(
-              readSingleCellValue(
-                latestDateLines
-              )
-            );
 
 
       const msyRaw =
@@ -2903,10 +2920,7 @@ function applyStaticTexts() {
       return {
 
         latestDate:
-          (
-            metadataLatestDate ||
-            fallbackLatestDate
-          ),
+          metadataLatestDate,
 
         validDays:
           num(
@@ -5005,7 +5019,6 @@ function applyStaticTexts() {
     function renderDashboard(
       lines,
       metaLines,
-      dateLines,
       sourceUsed
     ) {
 
@@ -5015,10 +5028,6 @@ function applyStaticTexts() {
 
       latestMetaRows =
         metaLines;
-
-
-      latestDateRows =
-        dateLines;
 
 
       latestSourceUsed =
@@ -5033,8 +5042,7 @@ function applyStaticTexts() {
        */
       const meta =
         readMonthlyMetadata(
-          metaLines,
-          dateLines
+          metaLines
         );
 
 
@@ -5495,11 +5503,7 @@ function applyStaticTexts() {
               "월간 작업일지 요청"
             ),
 
-            loadGvizRowsBySheetRange(
-              MONTHLY_LINK_SHEET_NAME,
-              MONTHLY_META_RANGE,
-              "월간 메타 요청"
-            ),
+            loadMonthlyMetadataRows(),
 
             loadGvizRowsBySheetRange(
               ANNUAL_LINK_SHEET_NAME,
@@ -5521,30 +5525,6 @@ function applyStaticTexts() {
           results[2];
 
 
-        let monthlyLatestDateRows =
-          [];
-
-
-        const metadataCheck =
-          readMonthlyMetadata(
-            monthlyMetaRows,
-            monthlyLatestDateRows
-          );
-
-
-        if (
-          !metadataCheck.latestDate
-        ) {
-
-          monthlyLatestDateRows =
-            await loadGvizRowsBySheetRange(
-              MONTHLY_LINK_SHEET_NAME,
-              MONTHLY_LATEST_DATE_RANGE,
-              "최신 유효일 fallback 요청"
-            );
-        }
-
-
         const sourceText =
           MONTHLY_LINK_SHEET_NAME +
           "!" +
@@ -5554,7 +5534,6 @@ function applyStaticTexts() {
         renderDashboard(
           monthlyDataRows,
           monthlyMetaRows,
-          monthlyLatestDateRows,
           sourceText
         );
 
@@ -5617,15 +5596,8 @@ function applyStaticTexts() {
           ${escapeHtml(
             MONTHLY_LINK_SHEET_NAME +
             "!" +
-            MONTHLY_META_RANGE
+            MONTHLY_META_RANGES.join(", ")
           )}<br>
-
-          최신 유효일 fallback:
-          ${escapeHtml(
-            MONTHLY_LINK_SHEET_NAME +
-            "!" +
-            MONTHLY_LATEST_DATE_RANGE
-          )} (월간 메타에 최신일이 없을 때만 요청)<br>
 
           연간 집계 요청:
           ${escapeHtml(

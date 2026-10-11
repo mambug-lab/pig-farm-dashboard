@@ -248,6 +248,7 @@ function collectMonthlyAnalysesFromDescriptors_(
     groupAuditContext.records
   );
 
+  activateNoMovementDiaryDays_(analyses);
   applyInventoryAuditAdjustments_(analyses);
   applyGroupInventoryAuditAdjustments_(
     analyses,

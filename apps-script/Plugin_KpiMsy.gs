@@ -267,7 +267,9 @@ function extractDailyKpiFromBlock_(
     // J is a closing count, so it affects MSY exposure from the next day.
     msySowCount: block.officialGroupStocks && block.officialGroupStocks.sow
       ? block.officialGroupStocks.sow.previous : sowCount,
-    movementsConfirmed: block.inputAnchorCount > 0,
+    // E:H blanks and zeros are equally valid no-movement entries.
+    movementsConfirmed: true,
+    noMovement: block.noMovement === true,
     sowResidual: block.officialGroupStocks && block.officialGroupStocks.sow
       ? block.officialGroupStocks.sow.residual : 0,
     sowAuditCorrection: (block.appliedInventoryAudits || []).filter(function(audit) {

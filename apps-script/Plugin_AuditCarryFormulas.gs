@@ -74,6 +74,10 @@ function installClosingCensusCarryoverUnlocked_(ss) {
     const analyses=listMonthlySheetDescriptors_(ss).map(function(item) {
       return analyzeMonthlySheet_(item.sheet,item.sheetName,item.month,item.year);
     });
+    // A zero/blank month-end inside the recorded period is a no-movement day.
+    const groupContext=readGroupInventoryAuditRecords_(ss);
+    matchGroupInventoryAuditsToBlocks_(analyses,groupContext.records);
+    activateNoMovementDiaryDays_(analyses);
     const plan=buildAuditCarryFormulaPlan_(analyses);
     const backup=ensureAuditSystemSheet_(ss,'시스템_실사수식원본','AUDIT_FORMULA_BACKUP_V1',4);
     if (!backup.getLastRow()) backup.getRange(1,1,1,4).setValues([['AUDIT_FORMULA_BACKUP_V1','recorded_at_utc','target','original_and_replacement']]);

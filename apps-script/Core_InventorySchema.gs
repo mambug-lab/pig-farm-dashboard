@@ -108,7 +108,7 @@ function classifyGroupInventoryTargetKey_(currentSection, section, sub) {
   if (sectionText.indexOf("доращ") !== -1) return "growing";
   if (sectionText.indexOf("откорм ст") !== -1 || sectionText.indexOf("откорм стар") !== -1) return "fattening_old";
   if (sectionText.indexOf("откорм нов") !== -1) return "fattening_new";
-  if (text.indexOf("свиномат") !== -1 || text.indexOf("свино маток") !== -1 || text.indexOf("супорос") !== -1 || text.indexOf("лактир") !== -1) return "sow";
+  if (text.indexOf("свиномат") !== -1 || text.indexOf("свино маток") !== -1 || text.indexOf("супорос") !== -1 || text.indexOf("лактир") !== -1 || text.indexOf("холост") !== -1) return "sow";
   return "";
 }
 

@@ -19,10 +19,10 @@ const AUDIT_TEXT = {
     opposite:'돈군별 차이의 부호가 달라 순합계만으로는 미해결 차이를 판단할 수 없습니다.',
     room:'돈방', stock:'두수', recheck:'재확인 필요', msy:'MSY 계산 · 신뢰도',
     complete:'기록 요건 충족', provisional:'잠정', unknown:'산정 불가',
-    msyBasis:'일별 시작 모돈수로 평균을 계산합니다. 누락일의 모돈수는 추정 이월하며 출하를 만들어 넣지 않습니다.',
+    msyBasis:'분만·임신 여부와 관계없이 모돈군 전체의 일별 시작 두수를 반영합니다. 마지막 실제 변동·실사일까지 집계하며, 그 사이 이동란의 빈칸과 0은 모두 변동 없음입니다.',
     msyCaution:'기록 요건 충족은 실제 출하전표와 모든 실사를 대조했다는 뜻은 아닙니다.',
     value:'연환산 MSY', days:'누적 달력일', validDays:'유효 작업일', average:'일평균 모돈수',
-    missing:'일지 누락', movement:'이동 기록 미확인', sowResidual:'모돈 잔차 미해결', sowCorrection:'모돈 실사차이 원인 미확인',
+    missing:'날짜 블록 누락', movement:'이동 기록 미확인', noMovement:'변동 없는 날', sowResidual:'모돈 잔차 미해결', sowCorrection:'모돈 실사차이 원인 미확인',
     history:'실사 조정 이력', historyNote:'시스템이 관측한 J열과 계산 결과의 변경 이력입니다. 관측 시각은 실제 입력 시각이 아닙니다.',
     empty:'기록이 없습니다.', date:'실사일', next:'다음 날 적용', before:'실사 전 계산', actual:'실사', correction:'조정', source:'원본',
     observed:'최초 관측', revised:'변경 관측', removed:'삭제 관측', prevPage:'이전', nextPage:'다음',
@@ -42,10 +42,10 @@ const AUDIT_TEXT = {
     opposite:'Разницы категорий имеют разные знаки; общий остаток не отражает всех расхождений.',
     room:'Помещение', stock:'Голов', recheck:'Нужен пересчёт', msy:'MSY · достоверность',
     complete:'Записи полные', provisional:'Предварительно', unknown:'Расчёт недоступен',
-    msyBasis:'Среднее по начальному поголовью свиноматок каждого дня. Пропуски оцениваются переносом; продажи не добавляются.',
+    msyBasis:'Учитываются все свиноматки, включая холостых, по поголовью на начало каждого дня. Расчёт — до последнего фактического движения или пересчёта; внутри периода пустые клетки перемещений и 0 одинаково означают отсутствие изменений.',
     msyCaution:'Полнота записей не означает сверку всех накладных и фактического поголовья.',
     value:'MSY в годовом выражении', days:'Календарных дней', validDays:'Дней журнала', average:'Среднее поголовье свиноматок',
-    missing:'Нет журнала', movement:'Перемещения не подтверждены', sowResidual:'Разница по свиноматкам', sowCorrection:'Причина поправки свиноматок не выяснена',
+    missing:'Нет блока даты', movement:'Перемещения не подтверждены', noMovement:'Дней без изменений', sowResidual:'Разница по свиноматкам', sowCorrection:'Причина поправки свиноматок не выяснена',
     history:'История поправок', historyNote:'Изменения J и расчётов, обнаруженные системой. Время обнаружения не является временем ввода.',
     empty:'Нет записей.', date:'Дата пересчёта', next:'Начало следующего дня', before:'До пересчёта', actual:'Факт', correction:'Поправка', source:'Источник',
     observed:'Первое наблюдение', revised:'Изменение', removed:'Удаление', prevPage:'Назад', nextPage:'Далее',
@@ -153,9 +153,10 @@ function renderAuditDetails() {
   html += '<details><summary>' + esc(auditText('msy')) + ' · ' + esc(auditText(quality.confidence === 'complete_records' ? 'complete' : quality.confidence === 'provisional' ? 'provisional' : 'unknown')) + '</summary><div class="audit-content">';
   html += auditFacts([[auditText('value'),msy.msy === null ? '-' : msy.msy.toFixed(2)],
     [auditText('days'),msy.elapsedDays],[auditText('validDays'),msy.validDiaryDays],
-    [auditText('average'),msy.avgSow === null ? '-' : msy.avgSow.toFixed(2)]]);
+    [auditText('average'),msy.avgSow === null ? '-' : msy.avgSow.toFixed(2)],
+    [auditText('noMovement'),(quality.noMovementDates || []).length]]);
   html += '<p class="audit-note">'+esc(auditText('msyBasis'))+'</p>';
-  [['missing','missingDates'],['movement','unconfirmedMovementDates'],['sowResidual','unresolvedSowDates'],['sowCorrection','sowAdjustmentDates']].forEach(function(pair) {
+  [['missing','missingDates'],['sowResidual','unresolvedSowDates'],['sowCorrection','sowAdjustmentDates']].forEach(function(pair) {
     const dates = quality[pair[1]] || [];
     if (dates.length) html += '<p class="audit-warning">'+esc(auditText(pair[0]))+' ('+dates.length+'): '+esc(dates.join(', '))+'</p>';
   });

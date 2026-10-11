@@ -179,6 +179,11 @@ function analyzeMonthlySheet_(
         )
     };
 
+    // Zero and blank E:H both mean no movement. Only a nonzero movement
+    // or a physical census establishes the last recorded date.
+    block.hasActualMovement = hasActualDiaryMovement_(scan, block);
+    block.hasValidInput = block.hasActualMovement || inventoryAudit.count > 0;
+
 
     allBlocks.push(
       block
@@ -786,7 +791,7 @@ function inspectAnchorInputsInBlock_(
         isManualNumericInput_(
           displayValue,
           formula
-        )
+        ) && cellNumber_(displayRow, scan.values[rowNum - 1], colNum - 1) !== 0
       ) {
 
         state.hasManualInput =
@@ -891,6 +896,45 @@ function inspectAnchorInputsInBlock_(
     missingAnchors:
       missingAnchors
   };
+}
+
+function hasActualDiaryMovement_(scan, block) {
+  return collectInventoryEntityRows_(scan, block, false).some(function(entity) {
+    const index = entity.rowNum - 1;
+    return [4, 5, 6, 7].some(function(col) {
+      return isManualNumericInput_(scan.displayValues[index][col], scan.formulas[index][col]) &&
+        cellNumber_(scan.displayValues[index], scan.values[index], col) !== 0;
+    });
+  });
+}
+
+// Include existing dated blocks through the last movement/census, across months.
+// An empty or zero-only date after that cutoff is still an unused template.
+// A missing date block is not synthesized; MSY quality reports structural gaps.
+function activateNoMovementDiaryDays_(analyses) {
+  let lastDate = null;
+  (analyses || []).forEach(function(info) {
+    (info.allBlocks || []).forEach(function(block) {
+      const group = block.groupInventoryAuditRecord;
+      block.hasActualMovement = hasActualDiaryMovement_(info.scan, block);
+      const event = block.hasActualMovement ||
+        inspectInventoryAuditInputsInBlock_(info.scan, block.dateBlockStartRow, block.copyEndRow).count > 0 ||
+        (group && group.canApply && group.groupValues);
+      if (event && (!lastDate || block.date > lastDate)) lastDate = block.date;
+    });
+  });
+  (analyses || []).forEach(function(info) {
+    info.validBlocks = [];
+    info.hasValidInput = false;
+    info.validCount = 0;
+    info.latestDate = null;
+    (info.allBlocks || []).forEach(function(block) {
+      block.hasValidInput = Boolean(lastDate && block.date <= lastDate);
+      block.noMovement = block.hasValidInput && !block.hasActualMovement;
+      if (block.hasValidInput) activateGroupAuditBlock_(info, block);
+    });
+  });
+  return lastDate;
 }
 
 

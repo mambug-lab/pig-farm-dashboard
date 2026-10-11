@@ -150,6 +150,8 @@ function refreshMonthlyLinkSheet() {
   const monthlyAnalyses =
     collectMonthlyAnalyses_(ss);
 
+  validateDashboardCarryovers_(monthlyAnalyses);
+
 
   const dailyRecords =
     collectAnnualDailyKpiRecords_(
@@ -196,6 +198,8 @@ function refreshAnnualLinkSheet() {
 
   const monthlyAnalyses =
     collectMonthlyAnalyses_(ss);
+
+  validateDashboardCarryovers_(monthlyAnalyses);
 
 
   const dailyRecords =

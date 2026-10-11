@@ -90,7 +90,7 @@ function inspectInventoryAuditInputsInBlock_(
       isGrandTotalLabel_(sub)
     ) {
 
-      continue;
+      break;
     }
 
 
@@ -205,13 +205,7 @@ function applyInventoryAuditAdjustments_(
             chronologicalBlocks.push({
               info:
                 info,
-              block:
-                block,
-              resetDetailedOffsets:
-                Boolean(
-                  analysisIndex > 0 &&
-                  blockIndex === 0
-                )
+              block: block
             });
           }
         );
@@ -247,9 +241,10 @@ function applyInventoryAuditAdjustments_(
   chronologicalBlocks.forEach(
     function(item) {
 
-      if (item.resetDetailedOffsets) {
-        entityStates.clear();
-      }
+      // A calendar boundary is not a physical count. Keep the last J closing
+      // across manual and generated months; a copied D must not apply it twice.
+      const groupRecord = item.block.groupInventoryAuditRecord;
+      if (!item.block.hasValidInput && !(groupRecord && groupRecord.canApply)) return;
 
       applyInventoryAuditToBlock_(
         item.info,
@@ -356,6 +351,7 @@ function applyInventoryAuditToBlock_(
 
   block.appliedInventoryAudits =
     [];
+  block.roomAuditStates = [];
 
 
   for (
@@ -457,7 +453,7 @@ function applyInventoryAuditToBlock_(
       );
 
 
-      continue;
+      break;
     }
 
 
@@ -679,10 +675,9 @@ function applyInventoryAuditToBlock_(
       );
 
 
-    const previousOffset =
-      Number(
-        state.offset || 0
-      );
+    const previousOffset = state.auditDate
+      ? state.current - rawPrevious
+      : Number(state.offset || 0);
 
 
     const adjustedPrevious =
@@ -700,13 +695,13 @@ function applyInventoryAuditToBlock_(
       );
 
 
-    let adjustedCurrent =
-      rawCurrent +
-      previousOffset;
-
-
-    let currentOffset =
-      previousOffset;
+    const movement = [4, 5, 6, 7].map(function(col) {
+      return cellNumber_(displayRow, valueRow, col);
+    });
+    let adjustedCurrent = state.auditDate
+      ? adjustedPrevious + movement[0] - movement[1] - movement[2] - movement[3]
+      : rawCurrent + previousOffset;
+    const calculatedClosing = adjustedCurrent;
 
 
     if (audit.hasValue) {
@@ -715,12 +710,15 @@ function applyInventoryAuditToBlock_(
         audit.value;
 
 
-      currentOffset =
-        adjustedCurrent -
-        rawCurrent;
-
-
+      state.auditDate = dateKey_(block.date);
+      state.auditSheet = info.sheetName;
+      state.auditCell = "J" + rowNum;
       block.appliedInventoryAudits.push({
+        date: dateKey_(block.date),
+        effectiveDate: dateKey_(new Date(block.date.getFullYear(), block.date.getMonth(), block.date.getDate() + 1, 12)),
+        sheetName: info.sheetName,
+        section: currentSection,
+        room: sub,
         cell:
           columnNumberToLetter_(
             DASHBOARD_CONFIG
@@ -738,19 +736,12 @@ function applyInventoryAuditToBlock_(
             sub
           ),
 
-        previousCalculated:
-          rawCurrent +
-          previousOffset,
+        previousCalculated: calculatedClosing,
 
         actual:
           adjustedCurrent,
 
-        correction:
-          adjustedCurrent -
-          (
-            rawCurrent +
-            previousOffset
-          )
+        correction: adjustedCurrent - calculatedClosing
       });
     }
 
@@ -826,7 +817,15 @@ function applyInventoryAuditToBlock_(
 
 
     state.offset =
-      currentOffset;
+      adjustedCurrent - rawCurrent;
+    state.current = adjustedCurrent;
+    block.roomAuditStates.push({
+      entityKey: entityKey,
+      groupKey: classifyGroupInventoryTargetKey_(currentSection, section, sub),
+      section: currentSection, room: sub, previous: adjustedPrevious,
+      current: adjustedCurrent, auditDate: state.auditDate || "",
+      auditSheet: state.auditSheet || "", auditCell: state.auditCell || ""
+    });
 
 
     entityStates.set(
@@ -1021,11 +1020,18 @@ function manualInventoryAuditValue_(
 
   if (
     !result.hasValue ||
+    typeof (valueRow && valueRow[zeroBasedCol]) !== 'number' ||
     result.value < 0 ||
     !Number.isInteger(
       result.value
     )
   ) {
+
+    const raw = valueRow && valueRow[zeroBasedCol];
+    const formula = formulaRow && formulaRow[zeroBasedCol];
+    if (formula || (raw !== undefined && raw !== null && String(raw).trim() !== '')) {
+      throw new Error('J열 실사두수는 숫자 형식의 0 이상 정수를 직접 입력해야 합니다. 문자·수식·음수·소수는 적용할 수 없습니다.');
+    }
 
     return {
       hasValue:

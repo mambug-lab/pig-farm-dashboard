@@ -264,6 +264,15 @@ function extractDailyKpiFromBlock_(
 
     date:
       block.date,
+    // J is a closing count, so it affects MSY exposure from the next day.
+    msySowCount: block.officialGroupStocks && block.officialGroupStocks.sow
+      ? block.officialGroupStocks.sow.previous : sowCount,
+    movementsConfirmed: block.inputAnchorCount > 0,
+    sowResidual: block.officialGroupStocks && block.officialGroupStocks.sow
+      ? block.officialGroupStocks.sow.residual : 0,
+    sowAuditCorrection: (block.appliedInventoryAudits || []).filter(function(audit) {
+      return audit.groupAuditKey === 'sow';
+    }).reduce(function(sum, audit) { return sum + Math.abs(audit.correction); }, 0),
 
     sheetName:
       sheetName,
@@ -529,7 +538,7 @@ function buildAnnualMonthlySummary_(
  * 누적 예상 MSY
  ***************************************************************/
 
-function calculateCumulativeExpectedMsy_(
+function calculateObservedMsy_(
   records
 ) {
 

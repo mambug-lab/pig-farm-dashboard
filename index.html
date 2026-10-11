@@ -15,6 +15,7 @@
   </title>
 
 
+  <link rel="stylesheet" href="audit-details.css">
   <style>
 
     :root {
@@ -1221,6 +1222,11 @@
     </div>
 
 
+    <div class="audit-tabs" role="tablist" aria-label="상세 정보">
+      <button id="side-rooms-tab" role="tab" aria-selected="true" aria-controls="side-tree" onclick="setSideView('rooms')">돈사별 두수</button>
+      <button id="side-audit-tab" role="tab" aria-selected="false" aria-controls="audit-details" onclick="setSideView('audit')">실사 · MSY 확인</button>
+    </div>
+    <div id="audit-details" class="side-body" role="tabpanel" hidden></div>
     <div
       class="side-body"
       id="side-tree"
@@ -1928,6 +1934,8 @@ function applyStaticTexts() {
       setLang(lang);
 
       applyStaticTexts();
+      updateAuditLabels();
+      if (auditDetailsCache) renderAuditDetails();
 
 
       if (
@@ -5455,6 +5463,8 @@ function applyStaticTexts() {
 
     async function loadPigsData() {
 
+      resetAuditDetails();
+
       setLoadingState(
         true
       );
@@ -5687,6 +5697,7 @@ function applyStaticTexts() {
 
 
       applyStaticTexts();
+      updateAuditLabels();
 
 
       document.getElementById(
@@ -5726,6 +5737,7 @@ function applyStaticTexts() {
 
 
   </script>
+  <script src="audit-details.js"></script>
 
 </body>
 

@@ -266,8 +266,8 @@ function applyGroupInventoryAuditAdjustments_(analyses, records) {
     return record.canApply && record.openingOfficeBaseline;
   }).forEach(function(record) {
     keys.forEach(function(key) {
-      states.set(key, {current: Number(record.groupValues[key]), offset: 0,
-        pending: new Set(), auditDate: dateKey_(record.date)});
+      states.set(key, {current: Number(record.groupValues[key]), offset: null,
+        pending: null, auditDate: dateKey_(record.date)});
     });
     record.applied = true;
     setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.APPLIED,
@@ -294,6 +294,18 @@ function applyGroupInventoryAuditAdjustments_(analyses, records) {
         applyRecord = false;
       }
     }
+    if (applyRecord) {
+      const conflicting = keys.filter(function(key) {
+        const audits = (block.appliedInventoryAudits || []).filter(function(audit) { return audit.groupAuditKey === key; });
+        return audits.length === byGroup[key].length && audits.length > 0 &&
+          audits.reduce(function(total, audit) { return total + audit.actual; }, 0) !== Number(record.groupValues[key]);
+      });
+      if (conflicting.length) {
+        setGroupAuditRecordStatus_(record, GROUP_INVENTORY_AUDIT_CONFIG.STATUS.DATA_ERROR,
+          'J и групповой пересчёт за один день не совпадают: ' + conflicting.join(', '));
+        throw new Error('동일 날짜의 J열 전체 실사와 그룹 실사가 다릅니다: ' + dateKey_(block.date) + ' / ' + conflicting.join(', '));
+      }
+    }
     if (applyRecord) activateGroupAuditBlock_(info, block);
     const official = {};
     let previousResidual = 0, currentResidual = 0;
@@ -306,8 +318,8 @@ function applyGroupInventoryAuditAdjustments_(analyses, records) {
       }, 0);
       const detailCurrent = members.reduce(function(sum, e) { return sum + e.currentStock; }, 0);
       let state = states.get(key);
-      // Office totals are authoritative. J and manual D remain detail-only.
-      // Roll forward using journal movements, never the manually reset opening.
+      // Group counts establish a baseline, not a permanent override of later J.
+      // Do not allocate an unknown group residual to individual rooms.
       const movement = members.reduce(function(sum, e) {
         const row = info.scan.values[e.rowNum - 1];
         const display = info.scan.displayValues[e.rowNum - 1];
@@ -316,13 +328,28 @@ function applyGroupInventoryAuditAdjustments_(analyses, records) {
       }, 0);
       const officialPrevious = state ? state.current : detailPrevious;
       const before = officialPrevious - detailPrevious;
+      const audits = (block.appliedInventoryAudits || []).filter(function(audit) {
+        return audit.groupAuditKey === key;
+      });
       if (state && !members.length) {
         throw new Error('관리사무소 기준 재고의 돈군을 찾을 수 없습니다: ' + key + ' / ' + dateKey_(block.date));
       }
       if (state) {
+        if (state.pending === null) {
+          state.offset = before;
+          state.pending = new Set(before ? Array.from(memberKeys) : []);
+        }
         state.current += movement;
+        if (state.pending.size) {
+          // A partial census cannot identify where the old residual belongs.
+          audits.forEach(function(audit) { state.pending.delete(audit.entityKey); });
+          if (!state.pending.size) state.current = detailCurrent;
+        } else {
+          state.current += audits.reduce(function(sum, audit) { return sum + audit.correction; }, 0);
+        }
         state.offset = state.current - detailCurrent;
-        state.pending = new Set(state.offset ? Array.from(memberKeys) : []);
+        // Unexplained structural/manual differences also need a new census.
+        if (state.offset && !state.pending.size) state.pending = new Set(Array.from(memberKeys));
       }
       if (applyRecord) {
         const calculated = state ? state.current : detailCurrent;
@@ -337,10 +364,14 @@ function applyGroupInventoryAuditAdjustments_(analyses, records) {
           correction: actual - calculated, carriedOffset: state.offset});
       }
       const residual = state ? state.offset : 0;
+      const roomStates = (block.roomAuditStates || []).filter(function(room) { return room.groupKey === key; });
+      const auditDates = roomStates.map(function(room) { return room.auditDate; }).filter(Boolean).sort();
       official[key] = {previous: detailPrevious + before, current: detailCurrent + residual,
         detailPrevious: detailPrevious, detailCurrent: detailCurrent, residual: residual,
         pendingKeys: state ? Array.from(state.pending) : [], count: members.length,
-        auditDate: state ? state.auditDate : ''};
+        auditDate: state ? state.auditDate : '',
+        latestRoomAuditDate: auditDates.length ? auditDates[auditDates.length - 1] : '',
+        unauditedKeys: roomStates.filter(function(room) { return !room.auditDate; }).map(function(room) { return room.entityKey; })};
       previousResidual += before;
       currentResidual += residual;
       // Only genuine summary rows may receive a group value. A single-room

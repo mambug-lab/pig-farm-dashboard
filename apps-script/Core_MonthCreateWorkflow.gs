@@ -362,7 +362,8 @@ function createMonthlySheetForTargetUnlocked_(
   );
 
 
-  refreshDashboardLinksUnlocked_();
+   installClosingCensusCarryoverUnlocked_(ss);
+   refreshDashboardLinksUnlocked_();
 
 
   Logger.log(

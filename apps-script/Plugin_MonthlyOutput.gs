@@ -85,6 +85,8 @@ function refreshMonthlyLinkSheetInternal_(
     values
   );
 
+  refreshInventoryAuditDetails_(ss, monthlyAnalyses, msySummary, latestMonthSummary);
+
 
   Logger.log(
     [

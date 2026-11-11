@@ -188,11 +188,6 @@
     transform .15s ease;
 }
 
-.lang-btn[data-lang="ko_kp"] {
-  white-space:nowrap;
-  font-size:11px;
-}
-
 .lang-btn:hover {
   background:#ffffff;
   transform:translateY(-1px);
@@ -908,8 +903,6 @@
     >
   </button>
 
-  <button type="button" class="lang-btn" data-lang="ko_kp"
-    onclick="changeLanguage('ko_kp')" title="조선어" aria-label="조선어로 변경" aria-pressed="false">조선어</button>
 </div>
 
 
@@ -1671,18 +1664,6 @@
     };
 
 
-    I18N.ko_kp = Object.assign({}, I18N.ko, {
-      monthlyStatusPanelTitle: "📊 월간 페사 및 판매 현황판",
-      monthlyMetric: "항목", monthlyCurrent: "이달", monthlyPrevious: "지난달",
-      monthlyChange: "증감", monthlyYtd: "년간 루계",
-      monthlySaleHeads: "판매(출하) 마리수", monthlyLossHeads: "페사 마리수",
-      monthlyTrendTitle: "월별 판매 및 페사 추이",
-      monthlySaleLegend: "판매(출하)", monthlyLossLegend: "페사",
-      monthlyNoData: "월별 자료가 없습니다.", monthlySamePeriod: "지난달 같은 기간 대비",
-      monthlyVsPrevious: "지난달 대비", monthlyPreviousPeriod: "지난달 같은 기간",
-      monthlySourceNote: "작업일지 집계 기준", headUnit: "마리"
-    });
-
     /* =========================================================
        돈군 분류
     ========================================================= */
@@ -1851,16 +1832,12 @@
 
     function getLang() {
 
-      return (
-        localStorage.getItem(
-          LANG_STORAGE_KEY
-        ) ||
-        "ko"
-      );
+      return localStorage.getItem(LANG_STORAGE_KEY) === "ru" ? "ru" : "ko";
     }
 
 
     function setLang(lang) {
+      lang = lang === "ru" ? "ru" : "ko";
 
       localStorage.setItem(
         LANG_STORAGE_KEY,
@@ -3805,9 +3782,7 @@ function applyStaticTexts() {
       const lang = getLang();
       const labels = lang === 'ru'
         ? ['Официальный итог', 'Сумма помещений', 'Нераспределённая поправка', 'Помещений с общей поправкой']
-        : lang === 'ko_kp'
-          ? ['공식 무리재고', '돈방별 합계', '미배분 무리 보정잔차', '보정 차이 관련 돈방']
-          : ['공식 그룹재고', '상세 돈방 합계', '미배분 그룹 보정잔차', '보정 차이 관련 돈방'];
+        : ['공식 그룹재고', '상세 돈방 합계', '미배분 그룹 보정잔차', '보정 차이 관련 돈방'];
       return labels[0] + ': ' + group.current.toLocaleString() + ' · ' +
         labels[1] + ': ' + group.detailCurrent.toLocaleString() + ' · ' +
         labels[2] + ': ' + group.residual.toLocaleString() + ' · ' + labels[3] + ': ' + group.pendingRooms;

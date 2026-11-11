@@ -4,7 +4,7 @@ const {FakeSheet}=require('./fake-sheets.cjs');
 function days(gs,y,m,n,sale=10,loss=2){return Array.from({length:n},(_,i)=>({date:new gs.TestDate(y,m-1,i+1,12),sale,loss}));}
 function ui(lang='ko'){
  const elements=new Map(),element=id=>{if(!elements.has(id))elements.set(id,{innerHTML:'',textContent:'',setAttribute(){}});return elements.get(id);};
- const context=vm.createContext({console,setTimeout,clearTimeout,window:{addEventListener(){}},document:{getElementById:element,querySelectorAll:()=>[]},localStorage:{getItem:()=>lang,setItem(){}}});
+ const context=vm.createContext({console,setTimeout,clearTimeout,window:{addEventListener(){}},document:{documentElement:{},getElementById:element,querySelectorAll:()=>[]},localStorage:{getItem:()=>lang,setItem(key,value){lang=value;}}});
  const html=fs.readFileSync(path.join(root,'index.html'),'utf8');
  vm.runInContext([...html.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)].map(m=>m[1]).join('\n'),context);
  return {context,element,html};
@@ -31,11 +31,11 @@ test('missing prior month, a missing day in either period, or nonfinite data can
  const cases=[current,[...prev.filter(r=>r.date.getDate()!==3),...current],[...prev,...current.filter(r=>r.date.getDate()!==3)],[...prev.map((r,i)=>i===2?{...r,sale:NaN}:r),...current]];
  for(const records of cases){const r=summary(g,records).at(-1);assert.equal(r.comparisonSale,null);assert.equal(r.comparisonLoss,null);}
 });
-test('GS output, raw GViz values, HTML parser, and all three languages agree',()=>{
+test('GS output, raw GViz values, HTML parser, and both supported languages agree',()=>{
  const g=loadGs(),summaries=summary(g,[...days(g,2026,10,31,0,0),...days(g,2026,11,6,17,3)]);
  const sheet=new FakeSheet('annual');g.writeAnnualMetadata_(sheet,{},summaries);
  const rows=sheet.rows.map(r=>r.slice(10,21));
- for(const [lang,label] of [['ko','전월 동기 대비'],['ru','К тому же периоду прошлого месяца'],['ko_kp','지난달 같은 기간 대비']]){
+ for(const [lang,label] of [['ko','전월 동기 대비'],['ru','К тому же периоду прошлого месяца']]){
   const {context:c,element,html}=ui(lang),parsed=c.readAnnualMonthlySummary(rows),stats=c.buildAnnualStats(parsed);c.renderMonthlyStatus(stats);
   assert.equal(stats.previous.sale,0);assert.match(element('monthly-status-body').innerHTML,new RegExp(label));assert.match(element('monthly-status-body').innerHTML,/\+102/);
   assert.match(element('monthly-status-body').innerHTML,/2026.10 · 1–6/);
@@ -48,12 +48,27 @@ test('GS output, raw GViz values, HTML parser, and all three languages agree',()
 });
 test('closed month gets full-month labels and an absent schema fails closed',()=>{
  const g=loadGs(),sheet=new FakeSheet('annual');g.writeAnnualMetadata_(sheet,{},summary(g,[...days(g,2026,9,30),...days(g,2026,10,31)]));
- for(const [lang,label] of [['ko','전월 대비'],['ru','К прошлому месяцу'],['ko_kp','지난달 대비']]){
+ for(const [lang,label] of [['ko','전월 대비'],['ru','К прошлому месяцу']]){
   const {context:c,element}=ui(lang);c.renderMonthlyStatus(c.buildAnnualStats(c.readAnnualMonthlySummary(sheet.rows.map(r=>r.slice(10,21)))));
   assert.match(element('monthly-status-body').innerHTML,new RegExp(label));
   c.renderMonthlyStatus(c.buildAnnualStats(c.readAnnualMonthlySummary([[2026,10,1,1,1],[2026,11,2,2,1]])));
   assert.match(element('monthly-status-body').innerHTML,/—/);
   for(const invalid of [null,undefined,NaN,Infinity])assert.equal(c.formatDelta(1,invalid,'sale').text,'—');
   assert.match(c.formatDelta(0,0,'sale').text,/^0 /);
+ }
+});
+
+test('unsupported saved languages reset to Korean; Russian stays selected',()=>{
+ for(const saved of [null, '', 'retired-language', 'ko', 'ru']){
+  const {context:c,html}=ui(saved),expected=saved==='ru'?'ru':'ko';
+  assert.equal(c.getLang(),expected);
+  c.setLang(c.getLang());
+  assert.equal(c.localStorage.getItem('pig_dashboard_language'),expected);
+  assert.equal(c.document.documentElement.lang,expected);
+  assert.equal(vm.runInContext('JSON.stringify(Object.keys(I18N))',c),'["ko","ru"]');
+  assert.deepEqual([...html.matchAll(/data-lang="([^"]+)"/g)].map(m=>m[1]),['ko','ru']);
+  c.setLang('unsupported');
+  assert.equal(c.getLang(),'ko');
+  assert.equal(c.document.documentElement.lang,'ko');
  }
 });

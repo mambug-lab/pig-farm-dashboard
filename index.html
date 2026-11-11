@@ -188,6 +188,11 @@
     transform .15s ease;
 }
 
+.lang-btn[data-lang="ko_kp"] {
+  white-space:nowrap;
+  font-size:11px;
+}
+
 .lang-btn:hover {
   background:#ffffff;
   transform:translateY(-1px);
@@ -458,6 +463,13 @@
       font-weight:800;
     }
 
+
+    .monthly-table td,
+    .monthly-axis-tick {
+      font-size:.85rem;
+      font-weight:800;
+      font-family:inherit;
+    }
 
     .monthly-table .metric-name {
       text-align:left;
@@ -896,6 +908,8 @@
     >
   </button>
 
+  <button type="button" class="lang-btn" data-lang="ko_kp"
+    onclick="changeLanguage('ko_kp')" title="조선어" aria-label="조선어로 변경" aria-pressed="false">조선어</button>
 </div>
 
 
@@ -1272,7 +1286,7 @@
 
 
     const ANNUAL_SUMMARY_RANGE =
-      "K1:O30";
+      "K1:U30";
 
 
     const COL_SECTION = 0;
@@ -1425,6 +1439,10 @@
 
         monthlyChange:
           "증감",
+        monthlySamePeriod: "전월 동기 대비",
+        monthlyVsPrevious: "전월 대비",
+        monthlyPreviousPeriod: "전월 동기",
+        monthlySourceNote: "작업일지 집계 기준",
 
         monthlyYtd:
           "연간 누적",
@@ -1594,6 +1612,10 @@
 
         monthlyChange:
           "Изменение",
+        monthlySamePeriod: "К тому же периоду прошлого месяца",
+        monthlyVsPrevious: "К прошлому месяцу",
+        monthlyPreviousPeriod: "Тот же период прошлого месяца",
+        monthlySourceNote: "По данным ежедневного журнала",
 
         monthlyYtd:
           "С начала года",
@@ -1648,6 +1670,18 @@
       }
     };
 
+
+    I18N.ko_kp = Object.assign({}, I18N.ko, {
+      monthlyStatusPanelTitle: "📊 월간 페사 및 판매 현황판",
+      monthlyMetric: "항목", monthlyCurrent: "이달", monthlyPrevious: "지난달",
+      monthlyChange: "증감", monthlyYtd: "년간 루계",
+      monthlySaleHeads: "판매(출하) 마리수", monthlyLossHeads: "페사 마리수",
+      monthlyTrendTitle: "월별 판매 및 페사 추이",
+      monthlySaleLegend: "판매(출하)", monthlyLossLegend: "페사",
+      monthlyNoData: "월별 자료가 없습니다.", monthlySamePeriod: "지난달 같은 기간 대비",
+      monthlyVsPrevious: "지난달 대비", monthlyPreviousPeriod: "지난달 같은 기간",
+      monthlySourceNote: "작업일지 집계 기준", headUnit: "마리"
+    });
 
     /* =========================================================
        돈군 분류
@@ -3038,7 +3072,7 @@ function applyStaticTexts() {
 
 
     /*
-     * 별도 조회한 연간연동용 K1:O30의 월별 집계표만 읽는다.
+     * 별도 조회한 연간연동용 K1:U30의 월별 집계표만 읽는다.
      *
      * HTML에서 원본 ВСЕГО를 다시 합산하지 않는다.
      * 문자열 표식이 GViz 열 형식 추론으로 비어도,
@@ -3106,7 +3140,14 @@ function applyStaticTexts() {
           validDays:
             num(
               row[4]
-            )
+            ),
+          comparison: row[10] === "MONTH_COMPARISON_V1" ? {
+            cutoffDay: num(row[5]),
+            mode: row[6],
+            sale: typeof row[7] === "number" && Number.isFinite(row[7]) ? row[7] : null,
+            loss: typeof row[8] === "number" && Number.isFinite(row[8]) ? row[8] : null,
+            previousThroughDay: num(row[9])
+          } : null
         });
       }
 
@@ -4331,21 +4372,6 @@ function applyStaticTexts() {
       }
 
 
-      const previous =
-        monthlyRows.find(
-          function(item) {
-
-            return (
-              item.year ===
-                previousYear &&
-              item.month ===
-                previousMonth
-            );
-          }
-        ) ||
-        null;
-
-
       const yearRows =
         monthlyRows.filter(
           function(item) {
@@ -4364,7 +4390,9 @@ function applyStaticTexts() {
           current,
 
         previous:
-          previous,
+          current.comparison ? {sale: current.comparison.sale, loss: current.comparison.loss} : null,
+
+        comparison: current.comparison,
 
         previousYear:
           previousYear,
@@ -4409,12 +4437,12 @@ function applyStaticTexts() {
     ) {
 
       if (
-        previous === null ||
-        previous === undefined
+        !Number.isFinite(current) ||
+        !Number.isFinite(previous)
       ) {
 
         return {
-          text:"-",
+          text:"—",
           className:"delta-neutral"
         };
       }
@@ -4526,6 +4554,11 @@ function applyStaticTexts() {
         );
 
 
+      const comparison = stats.comparison;
+      const samePeriod = comparison && comparison.mode === 'samePeriod';
+      const periodText = day => day ? ' · 1–' + day : '';
+      const previousValue = value => Number.isFinite(value) ? formatHead(value) : '—';
+
       box.innerHTML = `
 
         <div class="monthly-table-wrap">
@@ -4560,7 +4593,7 @@ function applyStaticTexts() {
                   ).padStart(
                     2,
                     "0"
-                  )}
+                  )}${periodText(comparison && comparison.cutoffDay)}
 
                 </th>
 
@@ -4569,7 +4602,7 @@ function applyStaticTexts() {
 
                   ${escapeHtml(
                     tr(
-                      "monthlyPrevious"
+                      samePeriod ? "monthlyPreviousPeriod" : "monthlyPrevious"
                     )
                   )}
 
@@ -4580,7 +4613,7 @@ function applyStaticTexts() {
                   ).padStart(
                     2,
                     "0"
-                  )}
+                  )}${periodText(comparison && comparison.previousThroughDay)}
 
                 </th>
 
@@ -4588,7 +4621,7 @@ function applyStaticTexts() {
                 <th>
                   ${escapeHtml(
                     tr(
-                      "monthlyChange"
+                      comparison ? (samePeriod ? "monthlySamePeriod" : "monthlyVsPrevious") : "monthlyChange"
                     )
                   )}
                 </th>
@@ -4636,11 +4669,7 @@ function applyStaticTexts() {
 
                 <td>
                   ${
-                    previous
-                      ? formatHead(
-                          previous.sale
-                        )
-                      : "-"
+                    previousValue(previous && previous.sale)
                   }
                 </td>
 
@@ -4679,11 +4708,7 @@ function applyStaticTexts() {
 
                 <td>
                   ${
-                    previous
-                      ? formatHead(
-                          previous.loss
-                        )
-                      : "-"
+                    previousValue(previous && previous.loss)
                   }
                 </td>
 
@@ -4759,7 +4784,7 @@ function applyStaticTexts() {
 
 
           <div class="data-note">
-            Apps Script 연간 집계 기준
+            ${escapeHtml(tr("monthlySourceNote"))}
           </div>
 
         </div>
@@ -4983,7 +5008,7 @@ function applyStaticTexts() {
             x="${left - 5}"
             y="${top + 4}"
             text-anchor="end"
-            font-size="18"
+            class="monthly-axis-tick"
             fill="#4f6fe8"
           >
             ${maxSale}
@@ -4993,7 +5018,7 @@ function applyStaticTexts() {
           <text
             x="${width - right + 5}"
             y="${top + 4}"
-            font-size="18"
+            class="monthly-axis-tick"
             fill="#e74c3c"
           >
             ${maxLoss}
@@ -5518,7 +5543,8 @@ function applyStaticTexts() {
             loadGvizRowsBySheetRange(
               ANNUAL_LINK_SHEET_NAME,
               ANNUAL_SUMMARY_RANGE,
-              "연간 집계 요청"
+              "연간 집계 요청",
+              true
             )
           ]);
 

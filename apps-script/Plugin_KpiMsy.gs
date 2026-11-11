@@ -514,7 +514,7 @@ function buildAnnualMonthlySummary_(
     );
 
 
-  return Array
+  const summaries = Array
     .from(
       map.values()
     )
@@ -533,6 +533,8 @@ function buildAnnualMonthlySummary_(
         );
       }
     );
+
+  return addMonthlyComparisons_(summaries, records);
 }
 
 
@@ -864,4 +866,43 @@ function createEmptyMsyResult_(
     status:
       status
   };
+}
+
+// Compare only complete daily coverage; an absent diary is not a zero-movement day.
+function addMonthlyComparisons_(summaries, records) {
+  const daily = new Map();
+  (records || []).forEach(function(record) {
+    const date = record.date;
+    const key = date.getFullYear() * 12 + date.getMonth();
+    if (!daily.has(key)) daily.set(key, new Map());
+    daily.get(key).set(date.getDate(), record);
+  });
+  function period(days, through) {
+    let sale = 0, loss = 0;
+    for (let day = 1; day <= through; day++) {
+      const record = days && days.get(day);
+      if (!record || !Number.isFinite(record.sale) || !Number.isFinite(record.loss)) return null;
+      sale += record.sale;
+      loss += record.loss;
+    }
+    return {sale: sale, loss: loss};
+  }
+  return summaries.map(function(item) {
+    const key = item.year * 12 + item.month - 1;
+    const days = daily.get(key);
+    const cutoffDay = Math.max(...days.keys());
+    const monthEnd = new Date(item.year, item.month, 0).getDate();
+    const previousEnd = new Date(item.year, item.month - 1, 0).getDate();
+    const currentPeriod = period(days, cutoffDay);
+    const complete = cutoffDay === monthEnd && currentPeriod !== null;
+    const previousThroughDay = complete ? previousEnd : Math.min(cutoffDay, previousEnd);
+    const previous = currentPeriod && period(daily.get(key - 1), previousThroughDay);
+    return Object.assign({}, item, {
+      cutoffDay: cutoffDay,
+      comparisonMode: complete ? 'month' : 'samePeriod',
+      comparisonSale: previous ? previous.sale : null,
+      comparisonLoss: previous ? previous.loss : null,
+      previousThroughDay: previousThroughDay
+    });
+  });
 }

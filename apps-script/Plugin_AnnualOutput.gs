@@ -145,9 +145,15 @@ function writeAnnualMetadata_(
 
   ensureColumns_(
     sheet,
-    18
+    21
   );
 
+
+  // P:U extends the existing monthly summary without touching source diaries.
+  sheet.getRange(4, 16, DASHBOARD_CONFIG.METADATA_MANAGED_ROWS - 3, 6).clearContent();
+  sheet.getRange(5, 16, 1, 6).setValues([[
+    '누계 기준일', '비교 방식', '전월 비교 출하', '전월 비교 폐사', '전월 비교 말일', '비교 스키마'
+  ]]);
 
   const msyRows =
     buildMsyMetadataRows_(
@@ -225,7 +231,13 @@ function writeAnnualMetadata_(
 
             item.loss,
 
-            item.validDays
+            item.validDays,
+            item.cutoffDay,
+            item.comparisonMode,
+            item.comparisonSale === null ? "" : item.comparisonSale,
+            item.comparisonLoss === null ? "" : item.comparisonLoss,
+            item.previousThroughDay,
+            "MONTH_COMPARISON_V1"
 
           ];
         }
@@ -244,7 +256,7 @@ function writeAnnualMetadata_(
         6,
         11,
         rows.length,
-        5
+        11
       )
       .setValues(
         rows
